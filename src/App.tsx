@@ -750,8 +750,19 @@ function SplitView({ list, mutate, openReceipt, flash }: { list: ShoppingList; m
     if (!list.calculatorGroups.some(group => group.id === targetGroupId)) setTargetGroupId(first);
   }, [list.calculatorGroups, activeGroupId, targetGroupId]);
   useEffect(() => {
-    const itemIds = new Set(items.map(item => item.id));
+    const itemIds = new Set(bought.map(item => item.id));
     setSelectedItems(value => new Set(Array.from(value).filter(id => itemIds.has(id))));
+  }, [list.updatedAt]);
+  useEffect(() => {
+    const boughtIds = new Set(bought.map(item => item.id));
+    if (!list.calculatorGroups.some(group => group.allocations.some(allocation => !boughtIds.has(allocation.itemId)))) return;
+    mutate(value => ({
+      ...value,
+      calculatorGroups: value.calculatorGroups.map(group => ({
+        ...group,
+        allocations: group.allocations.filter(allocation => boughtIds.has(allocation.itemId)),
+      })),
+    }));
   }, [list.updatedAt]);
 
   const createGroup = () => {
@@ -832,13 +843,13 @@ function SplitView({ list, mutate, openReceipt, flash }: { list: ShoppingList; m
       ...section,
       allocations: section.items.flatMap(item => {
         const allocation = activeGroup.allocations.find(entry => entry.itemId === item.id);
-        return allocation ? [{ item, allocation }] : [];
+        return allocation && item.status === "bought" ? [{ item, allocation }] : [];
       }),
     })).filter(section => section.allocations.length),
   })).filter(store => store.sections.length) : [];
   const distributionStores = list.groups.map(store => ({
     ...store,
-    sections: store.sections.filter(section => section.items.length),
+    sections: store.sections.map(section => ({ ...section, items: section.items.filter(item => item.status === "bought") })).filter(section => section.items.length),
   })).filter(store => store.sections.length);
 
   const exportBought = () => {
@@ -907,7 +918,7 @@ function SplitView({ list, mutate, openReceipt, flash }: { list: ShoppingList; m
         const remaining = remainingFor(item);
         const status = item.status === "bought" ? "Куплено" : item.status === "cart" ? "В корзине" : "Запланировано";
         return <div className={`distribution-row${remaining <= 0 ? " allocated" : ""}${item.price === undefined ? " missing-price" : ""}`} key={item.id}><input type="checkbox" checked={selectedItems.has(item.id)} disabled={remaining <= 0 || !list.calculatorGroups.length} onChange={event => setSelectedItems(value => { const next = new Set(value); event.target.checked ? next.add(item.id) : next.delete(item.id); return next; })} aria-label={"Выбрать " + item.name} /><span>{item.name}<small>{status} · {String(item.qty).replace(".", ",")} {item.unit}{item.volume ? " · " + item.volume : ""}</small></span><span className="distribution-remaining">{remaining > 0 ? "Свободно " + String(remaining).replace(".", ",") + " " + item.unit : "Распределено"}</span><PriceInput item={item} onPrice={price => mutate(value => ({ ...value, groups: value.groups.map(group => ({ ...group, sections: group.sections.map(section => ({ ...section, items: section.items.map(entry => entry.id === item.id ? { ...entry, price } : entry) })) })) }))} /><b>₽</b></div>;
-      })}</div>)}</section>) : <p className="no-results">В списке пока нет товаров.</p>}
+      })}</div>)}</section>) : <p className="no-results">Купленных товаров пока нет.</p>}
     </section>
   </>;
 }
