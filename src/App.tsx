@@ -24,6 +24,51 @@ const formatListDates = (list: ShoppingList) => {
   return `${start.day} ${months[start.month - 1]} ${start.year} – ${end.day} ${months[end.month - 1]} ${end.year}`;
 };
 
+function normalizeItems(raw: unknown): Item[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== "object") return [];
+    const item = entry as Partial<Item>;
+    const qty = Number(item.qty);
+    return [{
+      ...item,
+      id: String(item.id || uid()),
+      name: String(item.name || ""),
+      qty: Number.isFinite(qty) ? qty : 1,
+      unit: String(item.unit || "шт."),
+      status: item.status === "cart" || item.status === "bought" ? item.status : "planned",
+    }];
+  });
+}
+
+function normalizeSections(raw: unknown): Section[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== "object") return [];
+    const section = entry as Partial<Section>;
+    return [{
+      ...section,
+      id: String(section.id || uid()),
+      name: String(section.name || ""),
+      items: normalizeItems(section.items),
+    }];
+  });
+}
+
+function normalizeGroups(raw: unknown): StoreGroup[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== "object") return [];
+    const group = entry as Partial<StoreGroup>;
+    return [{
+      ...group,
+      id: String(group.id || uid()),
+      name: String(group.name || "Магазин"),
+      sections: normalizeSections(group.sections),
+    }];
+  });
+}
+
 function migrateList(raw: unknown): ShoppingList {
   const list = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   if (Array.isArray(list.groups)) {
@@ -35,13 +80,13 @@ function migrateList(raw: unknown): ShoppingList {
       dateStart: String(list.dateStart || (oldDatedName ? "2026-08-08" : "")) || undefined,
       dateEnd: String(list.dateEnd || (oldDatedName ? "2026-08-09" : "")) || undefined,
       updatedAt: Number(list.updatedAt) || now(), schemaVersion: 2,
-      groups: (list.groups as StoreGroup[]).map(group => ({ ...group, id: group.id || uid(), sections: Array.isArray(group.sections) ? group.sections : [] })),
+      groups: normalizeGroups(list.groups),
     };
   }
   const oldName = String(list.name || "Покупки");
   const shop = oldName.replace(/^покупки\s+в\s+/i, "").trim();
   const store = String(list.store || "").trim();
-  const sections = Array.isArray(list.sections) ? list.sections as Section[] : [];
+  const sections = normalizeSections(list.sections);
   return {
     id: String(list.id || uid()), roomId: String(list.roomId || `list-${uid()}-${uid()}`),
     name: /^покупки\s+в\s+/i.test(oldName) ? "Елизарово" : oldName,
@@ -52,7 +97,9 @@ function migrateList(raw: unknown): ShoppingList {
   };
 }
 
-const listItems = (list: ShoppingList) => list.groups.flatMap(group => group.sections.flatMap(section => section.items));
+const listItems = (list: ShoppingList) => (list.groups || []).flatMap(group =>
+  (group.sections || []).flatMap(section => section.items || [])
+);
 
 const seed: Store = {
   activeId: "globus",
