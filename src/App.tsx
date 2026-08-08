@@ -16,7 +16,7 @@ const formatMoney = (n: number) => new Intl.NumberFormat("ru-RU", { style: "curr
 const seed: Store = {
   activeId: "globus",
   lists: [{
-    id: "globus", roomId: "globus-" + uid(), name: "Покупки в Глобус", store: "Саларьево", updatedAt: now(),
+    id: "globus", roomId: `globus-${uid()}-${uid()}`, name: "Покупки в Глобус", store: "Саларьево", updatedAt: now(),
     sections: [
       { id: uid(), name: "Хлеб", items: [
         { id: uid(), name: "Хлеб тостовый Harry's American Sandwich", qty: 1, unit: "шт.", status: "bought", price: 169.99 },
@@ -97,58 +97,126 @@ export default function App() {
   const [people, setPeople] = useState(4);
   const [newListName, setNewListName] = useState("");
   const [syncState, setSyncState] = useState<"syncing" | "online" | "error">("syncing");
-  const channel = useRef<BroadcastChannel | null>(null);
   const current = store.lists.find(l => l.id === store.activeId) || store.lists[0];
+  const currentRef = useRef<ShoppingList | undefined>(current);
+  const readyRoom = useRef<string | null>(null);
+  const remoteUpdatedAt = useRef<Record<string, number>>({});
 
-  const mutate = (fn: (list: ShoppingList) => ShoppingList) => setStore(prev => ({ ...prev, lists: prev.lists.map(l => l.id === prev.activeId ? { ...fn(l), updatedAt: now() } : l) }));
+  const mutate = (fn: (list: ShoppingList) => ShoppingList) => setStore(prev => ({ ...prev, lists: prev.lists.map(l => l.id === prev.activeId ? { ...fn(l), updatedAt: Math.max(now(), l.updatedAt + 1) } : l) }));
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2300); };
 
-  useEffect(() => {
-    channel.current = new BroadcastChannel("skladno");
-    channel.current.onmessage = e => setStore(prev => e.data.lists?.some((l: ShoppingList) => l.updatedAt > (prev.lists.find(p => p.id === l.id)?.updatedAt || 0)) ? e.data : prev);
-    return () => { channel.current?.close(); channel.current = null; };
-  }, []);
+  useEffect(() => { currentRef.current = current; }, [current]);
+
   useEffect(() => {
     localStorage.setItem("skladno-store", JSON.stringify(store));
-    channel.current?.postMessage(store);
   }, [store]);
   useEffect(() => {
     const hash = new URLSearchParams(location.hash.slice(1));
+    const room = hash.get("room") || "";
     const data = hash.get("data");
-    if (!data) return;
-    try {
-      const shared = JSON.parse(decodeURIComponent(escape(atob(data)))) as ShoppingList;
-      setStore(prev => {
-        const existing = prev.lists.find(list => list.roomId === shared.roomId);
-        if (existing) return { ...prev, activeId: existing.id };
-        const sharedId = uid();
-        return { lists: [...prev.lists, { ...shared, id: sharedId }], activeId: sharedId };
-      });
-    } catch { /* ignore invalid links */ }
+    if (!room && !data) return;
+    if (room && !/^[a-z0-9_-]{6,160}$/i.test(room)) return;
+    let snapshot: ShoppingList | null = null;
+    if (data) {
+      try { snapshot = JSON.parse(decodeURIComponent(escape(atob(data)))) as ShoppingList; } catch { /* old snapshot is optional */ }
+    }
+    const roomId = room || snapshot?.roomId;
+    if (!roomId) return;
+    setStore(prev => {
+      const existing = prev.lists.find(list => list.roomId === roomId);
+      if (existing) return { ...prev, activeId: existing.id };
+      const sharedId = uid();
+      const shared: ShoppingList = snapshot
+        ? { ...snapshot, id: sharedId, roomId }
+        : { id: sharedId, roomId, name: "Загрузка списка…", store: "", sections: [], updatedAt: 0 };
+      return { lists: [...prev.lists, shared], activeId: sharedId };
+    });
   }, []);
   useEffect(() => {
     if (!current) { setSyncState("error"); return; }
-    let stopped = false; const base = FIREBASE_URL;
-    const sync = async () => {
+    const roomId = current.roomId;
+    let stopped = false;
+    let firstPull = true;
+    let pulling = false;
+    readyRoom.current = null;
+
+    const saveToFirebase = async (list: ShoppingList) => {
+      const payload = { ...list, updatedAt: { ".sv": "timestamp" } };
+      const response = await fetch(`${FIREBASE_URL}/rooms/${roomId}.json`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error(`Firebase write failed: ${response.status}`);
+      return await response.json() as ShoppingList;
+    };
+
+    const applyRemote = (remote: ShoppingList) => {
+      const timestamp = Number(remote.updatedAt) || 0;
+      remoteUpdatedAt.current[roomId] = timestamp;
+      setStore(prev => {
+        const local = prev.lists.find(list => list.roomId === roomId);
+        if (!local) return prev;
+        return { ...prev, lists: prev.lists.map(list => list.roomId === roomId ? { ...remote, id: local.id, updatedAt: timestamp } : list) };
+      });
+    };
+
+    const pull = async () => {
+      if (pulling) return;
+      pulling = true;
       try {
-        setSyncState("syncing");
-        const res = await fetch(`${base}/rooms/${current.roomId}.json`);
+        if (firstPull) setSyncState("syncing");
+        const res = await fetch(`${FIREBASE_URL}/rooms/${roomId}.json`);
         if (!res.ok) throw new Error(`Firebase read failed: ${res.status}`);
         const remote = await res.json() as ShoppingList | null;
-        if (remote?.updatedAt && remote.updatedAt > current.updatedAt) {
-          setStore(prev => ({ ...prev, lists: prev.lists.map(list => list.id === prev.activeId ? { ...remote, id: list.id } : list) }));
+        const local = currentRef.current;
+        if (!local || local.roomId !== roomId || stopped) return;
+        if (!remote) {
+          applyRemote(await saveToFirebase(local));
         } else {
-          const write = await fetch(`${base}/rooms/${current.roomId}.json`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(current) });
-          if (!write.ok) throw new Error(`Firebase write failed: ${write.status}`);
+          const isDirty = local.updatedAt !== remoteUpdatedAt.current[roomId];
+          if (firstPull || (!isDirty && Number(remote.updatedAt) > local.updatedAt)) applyRemote(remote);
         }
-        if (!stopped) setSyncState("online");
+        readyRoom.current = roomId;
+        setSyncState("online");
       } catch (error) {
         console.error(error);
         if (!stopped) setSyncState("error");
+      } finally {
+        firstPull = false;
+        pulling = false;
       }
     };
-    sync(); const timer = window.setInterval(sync, 3500);
-    return () => { stopped = true; clearInterval(timer); };
+    pull();
+    const timer = window.setInterval(pull, 2500);
+    return () => { stopped = true; clearInterval(timer); if (readyRoom.current === roomId) readyRoom.current = null; };
+  }, [current?.roomId]);
+
+  useEffect(() => {
+    if (!current || readyRoom.current !== current.roomId || current.updatedAt === remoteUpdatedAt.current[current.roomId]) return;
+    const roomId = current.roomId;
+    const localVersion = current.updatedAt;
+    const timer = window.setTimeout(async () => {
+      try {
+        setSyncState("syncing");
+        const payload = { ...current, updatedAt: { ".sv": "timestamp" } };
+        const response = await fetch(`${FIREBASE_URL}/rooms/${roomId}.json`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error(`Firebase write failed: ${response.status}`);
+        const saved = await response.json() as ShoppingList;
+        const timestamp = Number(saved.updatedAt) || 0;
+        remoteUpdatedAt.current[roomId] = timestamp;
+        setStore(prev => ({ ...prev, lists: prev.lists.map(list => list.roomId === roomId && list.updatedAt === localVersion ? { ...saved, id: list.id, updatedAt: timestamp } : list) }));
+        setSyncState("online");
+      } catch (error) {
+        console.error(error);
+        setSyncState("error");
+      }
+    }, 300);
+    return () => clearTimeout(timer);
   }, [current?.roomId, current?.updatedAt]);
 
   const stats = useMemo(() => {
@@ -169,9 +237,7 @@ export default function App() {
   };
   const changeQty = (id: string, delta: number) => mutate(l => ({ ...l, sections: l.sections.map(s => ({ ...s, items: s.items.map(i => i.id === id ? { ...i, qty: Math.max(.001, Math.round((i.qty + delta) * 1000) / 1000) } : i) })) }));
   const share = async () => {
-    const safe = { ...current, id: "shared" };
-    const data = btoa(unescape(encodeURIComponent(JSON.stringify(safe))));
-    const url = `${location.origin}${location.pathname}#room=${current.roomId}&data=${data}`;
+    const url = `${location.origin}${location.pathname}#room=${encodeURIComponent(current.roomId)}`;
     try { await navigator.clipboard.writeText(url); flash("Ссылка скопирована"); } catch { flash("Скопируйте ссылку из поля"); }
   };
   const importList = () => {
@@ -245,7 +311,7 @@ export default function App() {
       {modal === "import" && <><span className="modal-icon">⇩</span><h2>Импорт списка</h2><p>Вставьте текст со строками «Отдел …» и товарами, начинающимися с маркера •.</p><textarea className="large" value={importText} onChange={e => setImportText(e.target.value)} placeholder={'Список покупок Глобус\n\nОтдел Хлеб\n• Хлеб тостовый, - 1 шт.'} /><button className="primary wide" onClick={importList}>Распознать и импортировать</button></>}
       {modal === "add" && <><span className="modal-icon">＋</span><h2>Добавить товары</h2><p>Один товар на строку. Количество можно написать через тире.</p><label>Отдел<select value={addSection} onChange={e => setAddSection(e.target.value)}>{current.sections.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label><textarea value={addText} onChange={e => setAddText(e.target.value)} placeholder={'Молоко — 2 шт.\nСметана — 1 уп.'} /><button className="primary wide" onClick={addItems}>Добавить товары</button></>}
       {modal === "receipt" && <><span className="modal-icon">▤</span><h2>Сверить с чеком</h2><p>Вставьте позиции чека вместе с ценами. Складно найдёт совпадения, добавит цены и отметит покупки.</p><textarea className="large" value={receiptText} onChange={e => setReceiptText(e.target.value)} placeholder={'Хлеб тостовый Harrys 169,99\nЛаваш Армянский 119,99'} /><button className="primary wide" onClick={applyReceipt}>Сопоставить позиции</button></>}
-      {modal === "share" && <><span className="modal-icon">↗</span><h2>Поделиться списком</h2><p>В ссылку попадёт только «{current.name}». Остальные списки останутся приватными.</p><div className="share-code">{current.roomId}<span>Секретный код списка</span></div><button className="primary wide" onClick={share}>Скопировать ссылку</button><small className="hint">Без облачной синхронизации ссылка содержит безопасную копию текущего списка.</small></>}
+      {modal === "share" && <><span className="modal-icon">↗</span><h2>Поделиться списком</h2><p>В ссылку попадёт только «{current.name}». Остальные списки останутся приватными.</p><div className="share-code">{current.roomId}<span>Секретный код списка</span></div><button className="primary wide" onClick={share}>Скопировать ссылку</button><small className="hint">Короткая ссылка содержит только секретный код списка.</small></>}
       {modal === "lists" && <ListManager store={store} setStore={setStore} current={current} newListName={newListName} setNewListName={setNewListName} close={() => setModal(null)} flash={flash} />}
     </div></div>}
   </div>;
@@ -260,9 +326,9 @@ function SplitView({ list, people, setPeople, mutate }: { list: ShoppingList; pe
 }
 
 function ListManager({ store, setStore, current, newListName, setNewListName, close, flash }: { store: Store; setStore: React.Dispatch<React.SetStateAction<Store>>; current: ShoppingList; newListName: string; setNewListName: (s: string) => void; close: () => void; flash: (s: string) => void }) {
-  const create = () => { if (!newListName.trim()) return; const id = uid(); const list: ShoppingList = { id, roomId: `${id}-${uid()}`, name: newListName.trim(), store: "", updatedAt: now(), sections: [{ id: uid(), name: "Общее", items: [] }] }; setStore(s => ({ lists: [...s.lists, list], activeId: id })); setNewListName(""); close(); };
+  const create = () => { if (!newListName.trim()) return; const id = uid(); const list: ShoppingList = { id, roomId: `${id}-${uid()}-${uid()}`, name: newListName.trim(), store: "", updatedAt: now(), sections: [{ id: uid(), name: "Общее", items: [] }] }; setStore(s => ({ lists: [...s.lists, list], activeId: id })); setNewListName(""); close(); };
   const remove = (id: string) => { if (store.lists.length === 1) return flash("Нельзя удалить единственный список"); const next = store.lists.filter(l => l.id !== id); setStore({ lists: next, activeId: id === store.activeId ? next[0].id : store.activeId }); };
-  const updateSections = (fn: (sections: Section[]) => Section[]) => setStore(s => ({ ...s, lists: s.lists.map(l => l.id === current.id ? { ...l, updatedAt: now(), sections: fn(l.sections) } : l) }));
+  const updateSections = (fn: (sections: Section[]) => Section[]) => setStore(s => ({ ...s, lists: s.lists.map(l => l.id === current.id ? { ...l, updatedAt: Math.max(now(), l.updatedAt + 1), sections: fn(l.sections) } : l) }));
   const addSection = () => updateSections(sections => [...sections, { id: uid(), name: "Новый отдел", items: [] }]);
   const renameSection = (id: string, name: string) => updateSections(sections => sections.map(section => section.id === id ? { ...section, name: name || "Без названия" } : section));
   const removeSection = (id: string) => {
