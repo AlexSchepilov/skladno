@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, Check, Divide, Download, List, MoreHorizontal, Pencil, Plus, ReceiptText, Search, Share2, ShoppingCart, Store as StoreIcon, Trash2, Undo2, X } from "lucide-react";
 
 type Status = "planned" | "cart" | "bought";
 type Item = { id: string; name: string; qty: number; unit: string; status: Status; price?: number; checked?: boolean };
@@ -6,7 +7,7 @@ type Section = { id: string; name: string; items: Item[] };
 type StoreGroup = { id: string; name: string; sections: Section[] };
 type ShoppingList = { id: string; roomId: string; name: string; groups: StoreGroup[]; updatedAt: number; schemaVersion: 2 };
 type Store = { lists: ShoppingList[]; activeId: string };
-type Modal = null | "import" | "add" | "receipt" | "share" | "lists";
+type Modal = null | "import" | "add" | "receipt" | "share" | "lists" | "store";
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 const now = () => Date.now();
@@ -128,6 +129,9 @@ export default function App() {
   const [people, setPeople] = useState(4);
   const [newListName, setNewListName] = useState("");
   const [openSectionMenu, setOpenSectionMenu] = useState("");
+  const [openStoreMenu, setOpenStoreMenu] = useState("");
+  const [editingGroup, setEditingGroup] = useState("");
+  const [storeDraft, setStoreDraft] = useState("");
   const [syncState, setSyncState] = useState<"syncing" | "online" | "error">("syncing");
   const current = store.lists.find(l => l.id === store.activeId) || store.lists[0];
   const currentRef = useRef<ShoppingList | undefined>(current);
@@ -324,14 +328,42 @@ export default function App() {
     mutate(list => ({ ...list, groups: list.groups.map(group => group.id === groupId ? { ...group, sections: group.sections.filter(item => item.id !== section.id) } : group) }));
     setOpenSectionMenu(""); flash("Отдел удалён");
   };
+  const openStoreEditor = (group?: StoreGroup) => {
+    setEditingGroup(group?.id || ""); setStoreDraft(group?.name || ""); setOpenStoreMenu(""); setModal("store");
+  };
+  const saveStore = () => {
+    if (!storeDraft.trim()) return flash("Введите название магазина");
+    mutate(list => editingGroup
+      ? { ...list, groups: list.groups.map(group => group.id === editingGroup ? { ...group, name: storeDraft.trim() } : group) }
+      : { ...list, groups: [...list.groups, { id: uid(), name: storeDraft.trim(), sections: [] }] });
+    setModal(null); flash(editingGroup ? "Магазин обновлён" : "Магазин добавлен");
+  };
+  const deleteStore = (group: StoreGroup) => {
+    const count = group.sections.flatMap(section => section.items).length;
+    if (!window.confirm(count ? `Удалить магазин «${group.name}» и ${count} товаров?` : `Удалить магазин «${group.name}»?`)) return;
+    mutate(list => ({ ...list, groups: list.groups.filter(item => item.id !== group.id) }));
+    setOpenStoreMenu(""); setModal(null); flash("Магазин удалён");
+  };
+  const updateSectionName = (groupId: string, sectionId: string, name: string) => mutate(list => ({ ...list, groups: list.groups.map(group => group.id === groupId ? { ...group, sections: group.sections.map(section => section.id === sectionId ? { ...section, name } : section) } : group) }));
+  const addDepartment = (groupId: string) => mutate(list => ({ ...list, groups: list.groups.map(group => group.id === groupId ? { ...group, sections: [...group.sections, { id: uid(), name: "Новый отдел", items: [] }] } : group) }));
+  const moveDepartment = (groupId: string, sectionId: string, direction: -1 | 1) => mutate(list => ({ ...list, groups: list.groups.map(group => {
+    if (group.id !== groupId) return group;
+    const named = group.sections.filter(section => section.name);
+    const index = named.findIndex(section => section.id === sectionId);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= named.length) return group;
+    [named[index], named[target]] = [named[target], named[index]];
+    let namedIndex = 0;
+    return { ...group, sections: group.sections.map(section => section.name ? named[namedIndex++] : section) };
+  }) }));
 
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><span>С</span><strong>Складно</strong></div>
-      <button className="create-list" onClick={() => setModal("lists")}><Icon>＋</Icon> Новый список</button>
+      <button className="create-list" onClick={() => setModal("lists")}><Icon><Plus /></Icon> Новый список</button>
       <div className="side-label">Мои списки</div>
       {store.lists.map(list => <button key={list.id} className={`side-list ${list.id === current.id ? "active" : ""}`} onClick={() => setStore(s => ({ ...s, activeId: list.id }))}>
-        <span className="bag">▱</span><span><b>{list.name}</b><small>{listItems(list).filter(i => i.status === "bought").length} из {listItems(list).length} куплено</small></span>
+        <span className="bag"><StoreIcon size={17} /></span><span><b>{list.name}</b><small>{listItems(list).filter(i => i.status === "bought").length} из {listItems(list).length} куплено</small></span>
       </button>)}
     </aside>
 
@@ -342,7 +374,7 @@ export default function App() {
           <div className="editable-title"><h1 contentEditable suppressContentEditableWarning onBlur={e => mutate(l => ({ ...l, name: e.currentTarget.textContent || l.name }))}>{current.name}</h1><button aria-label="Переименовать">✎</button></div>
           <span className="store-name">{current.groups.length} {current.groups.length === 1 ? "магазин" : "магазина"}</span>
         </div>
-        <div className="header-actions"><button className="secondary" onClick={() => { setImportGroup("__new"); setModal("import"); }}><Icon>⇩</Icon><span>Импорт</span></button><button className="primary" onClick={() => { setAddGroup(current.groups[0]?.id || ""); setAddSection("__none"); setModal("add"); }}><Icon>＋</Icon><span>Добавить</span></button><button className="round" onClick={() => setModal("share")} aria-label="Поделиться">↗</button></div>
+        <div className="header-actions"><button className="secondary" onClick={() => { setImportGroup("__new"); setModal("import"); }}><Icon><Download /></Icon><span>Импорт</span></button><button className="primary" onClick={() => { setAddGroup(current.groups[0]?.id || ""); setAddSection("__none"); setModal("add"); }}><Icon><Plus /></Icon><span>Добавить</span></button><button className="round" onClick={() => setModal("share")} aria-label="Поделиться"><Share2 size={18} /></button></div>
       </header>
 
       <nav className="tabs"><button className={view === "list" ? "active" : ""} onClick={() => setView("list")}>Список <span>{stats.total}</span></button><button className={view === "split" ? "active" : ""} onClick={() => setView("split")}>Калькулятор</button></nav>
@@ -352,12 +384,12 @@ export default function App() {
           <div><strong>{stats.bought}</strong><span>куплено</span></div><div><strong>{stats.cart}</strong><span>в корзине</span></div><div><strong>{stats.total - stats.bought - stats.cart}</strong><span>осталось</span></div>
           <div className="bar"><i style={{ width: `${stats.total ? stats.bought / stats.total * 100 : 0}%` }}></i><i style={{ width: `${stats.total ? stats.cart / stats.total * 100 : 0}%` }}></i></div>
         </section>
-        <div className="toolbar"><label className="search"><Icon>⌕</Icon><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Найти товар" /></label><button onClick={() => setModal("receipt")}><Icon>▤</Icon> Загрузить чек</button></div>
+        <div className="toolbar"><label className="search"><Icon><Search /></Icon><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Найти товар" /></label><button onClick={() => setModal("receipt")}><Icon><ReceiptText /></Icon> Загрузить чек</button><button className="add-store-button" onClick={() => openStoreEditor()} aria-label="Добавить магазин"><Icon><StoreIcon /></Icon><span>Добавить магазин</span></button></div>
         <div className="sections">
           {visibleGroups.map(group => <section className="store-group" key={group.id}>
-            <div className="store-head"><span className="store-icon">▱</span><div><h2>{group.name}</h2><small>{group.sections.flatMap(section => section.items).length} товаров</small></div></div>
+            <div className="store-head"><span className="store-icon"><StoreIcon size={18} /></span><div><h2>{group.name}</h2><small>{group.sections.flatMap(section => section.items).length} товаров</small></div><div className="store-menu-wrap"><button className="more store-more" onClick={() => setOpenStoreMenu(value => value === group.id ? "" : group.id)} aria-label={`Меню магазина ${group.name}`}><MoreHorizontal size={20} /></button>{openStoreMenu === group.id && <div className="section-menu store-menu"><button onClick={() => openStoreEditor(group)}><Pencil size={15} />Настроить магазин</button><button className="danger" onClick={() => deleteStore(group)}><Trash2 size={15} />Удалить магазин</button></div>}</div></div>
             <div className="store-sections">{group.sections.map(section => <section className={`department ${section.name ? "" : "direct"}`} key={section.id}>
-              {section.name && <div className="department-head"><button className="collapse" onClick={() => setCollapsed(c => { const n = new Set(c); n.has(section.id) ? n.delete(section.id) : n.add(section.id); return n; })}>{collapsed.has(section.id) ? "›" : "⌄"}</button><h2>{section.name}</h2><span>{section.items.filter(i => i.status === "bought").length}/{section.items.length}</span><div className="section-menu-wrap"><button className="more" onClick={() => setOpenSectionMenu(value => value === section.id ? "" : section.id)} aria-label={`Меню отдела ${section.name}`}>•••</button>{openSectionMenu === section.id && <div className="section-menu"><button onClick={() => renameSection(group.id, section)}>Переименовать</button><button className="danger" onClick={() => deleteSection(group.id, section)}>Удалить отдел</button></div>}</div></div>}
+              {section.name && <div className="department-head"><button className="collapse" onClick={() => setCollapsed(c => { const n = new Set(c); n.has(section.id) ? n.delete(section.id) : n.add(section.id); return n; })}>{collapsed.has(section.id) ? "›" : "⌄"}</button><h2>{section.name}</h2><span>{section.items.filter(i => i.status === "bought").length}/{section.items.length}</span><div className="section-menu-wrap"><button className="more" onClick={() => setOpenSectionMenu(value => value === section.id ? "" : section.id)} aria-label={`Меню отдела ${section.name}`}><MoreHorizontal size={18} /></button>{openSectionMenu === section.id && <div className="section-menu"><button onClick={() => renameSection(group.id, section)}><Pencil size={14} />Переименовать</button><button className="danger" onClick={() => deleteSection(group.id, section)}><Trash2 size={14} />Удалить отдел</button></div>}</div></div>}
               {(!section.name || !collapsed.has(section.id)) && <div className="items">{section.items.map(item => <ShoppingItemRow key={item.id} item={item} selected={selected.has(item.id)} onSelect={checked => setSelected(prev => { const next = new Set(prev); checked ? next.add(item.id) : next.delete(item.id); return next; })} onStatus={() => cycleStatus(item.id)} onQty={delta => changeQty(item.id, delta)} onDelete={() => deleteItems(new Set([item.id]))} />)}</div>}
             </section>)}</div>
           </section>)}
@@ -366,17 +398,18 @@ export default function App() {
       </> : <SplitView list={current} people={people} setPeople={setPeople} mutate={mutate} />}
     </main>
 
-    <nav className="mobile-nav"><button className="active" onClick={() => setView("list")}><Icon>☷</Icon>Список</button><button onClick={() => { setAddGroup(current.groups[0]?.id || ""); setAddSection("__none"); setModal("add"); }}><Icon>＋</Icon>Добавить</button><button onClick={() => setView("split")}><Icon>÷</Icon>Разделить</button><button onClick={() => setModal("share")}><Icon>↗</Icon>Поделиться</button></nav>
+    <nav className="mobile-nav"><button className="active" onClick={() => setView("list")}><Icon><List /></Icon>Список</button><button onClick={() => { setAddGroup(current.groups[0]?.id || ""); setAddSection("__none"); setModal("add"); }}><Icon><Plus /></Icon>Добавить</button><button onClick={() => setView("split")}><Icon><Divide /></Icon>Разделить</button><button onClick={() => setModal("share")}><Icon><Share2 /></Icon>Поделиться</button></nav>
 
-    {selected.size > 0 && <div className="bulk"><b>Выбрано: {selected.size}</b><button onClick={() => setStatus(selected, "cart")}>▣ В корзину</button><button onClick={() => setStatus(selected, "bought")}>✓ Куплено</button><button onClick={() => setStatus(selected, "planned")}>↶ Вернуть</button><button className="danger" onClick={() => window.confirm(`Удалить выбранные товары (${selected.size})?`) && deleteItems(selected)}>Удалить</button><button className="close" onClick={() => setSelected(new Set())}>×</button></div>}
-    {toast && <div className="toast">✓ {toast}</div>}
+    {selected.size > 0 && <div className="bulk"><b>Выбрано: {selected.size}</b><button onClick={() => setStatus(selected, "cart")}><ShoppingCart size={15} />В корзину</button><button onClick={() => setStatus(selected, "bought")}><Check size={15} />Куплено</button><button onClick={() => setStatus(selected, "planned")}><Undo2 size={15} />Вернуть</button><button className="danger" onClick={() => window.confirm(`Удалить выбранные товары (${selected.size})?`) && deleteItems(selected)}><Trash2 size={15} />Удалить</button><button className="close" onClick={() => setSelected(new Set())}><X size={18} /></button></div>}
+    {toast && <div className="toast"><Check size={16} />{toast}</div>}
 
     {modal && <div className="modal-backdrop" onMouseDown={e => e.currentTarget === e.target && setModal(null)}><div className="modal" role="dialog" aria-modal="true">
       <button className="modal-close" onClick={() => setModal(null)}>×</button>
-      {modal === "import" && <><span className="modal-icon">⇩</span><h2>Импорт покупок</h2><p>Заголовок «Список покупок …» станет названием магазина. Отделы можно не указывать.</p><label>Куда импортировать<select value={importGroup} onChange={e => setImportGroup(e.target.value)}><option value="__new">Создать новый магазин</option>{current.groups.map(group => <option key={group.id} value={group.id}>Добавить в «{group.name}»</option>)}</select></label><textarea className="large" value={importText} onChange={e => setImportText(e.target.value)} placeholder={'Список покупок Глобус Саларьево\n\nОтдел Хлеб\n• Хлеб тостовый, - 1 шт.'} /><button className="primary wide" onClick={importList}>Распознать и импортировать</button></>}
-      {modal === "add" && <><span className="modal-icon">＋</span><h2>Добавить товары</h2><p>Один товар на строку. Количество можно написать через тире.</p><label>Магазин<select value={addGroup} onChange={e => { setAddGroup(e.target.value); setAddSection("__none"); }}>{current.groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label><label>Отдел<select value={addSection} onChange={e => setAddSection(e.target.value)}><option value="__none">Без отдела</option>{current.groups.find(group => group.id === addGroup)?.sections.filter(section => section.name).map(section => <option key={section.id} value={section.id}>{section.name}</option>)}</select></label><textarea value={addText} onChange={e => setAddText(e.target.value)} placeholder={'Молоко — 2 шт.\nСметана — 1 уп.'} /><button className="primary wide" onClick={addItems}>Добавить товары</button></>}
-      {modal === "receipt" && <><span className="modal-icon">▤</span><h2>Сверить с чеком</h2><p>Вставьте позиции чека вместе с ценами. Складно найдёт совпадения, добавит цены и отметит покупки.</p><textarea className="large" value={receiptText} onChange={e => setReceiptText(e.target.value)} placeholder={'Хлеб тостовый Harrys 169,99\nЛаваш Армянский 119,99'} /><button className="primary wide" onClick={applyReceipt}>Сопоставить позиции</button></>}
-      {modal === "share" && <><span className="modal-icon">↗</span><h2>Поделиться списком</h2><p>В ссылку попадёт только «{current.name}». Остальные списки останутся приватными.</p><div className="share-code">{current.roomId}<span>Секретный код списка</span></div><button className="primary wide" onClick={share}>Скопировать ссылку</button><small className="hint">Короткая ссылка содержит только секретный код списка.</small></>}
+      {modal === "import" && <><span className="modal-icon"><Download size={21} /></span><h2>Импорт покупок</h2><p>Заголовок «Список покупок …» станет названием магазина. Отделы можно не указывать.</p><label>Куда импортировать<select value={importGroup} onChange={e => setImportGroup(e.target.value)}><option value="__new">Создать новый магазин</option>{current.groups.map(group => <option key={group.id} value={group.id}>Добавить в «{group.name}»</option>)}</select></label><textarea className="large" value={importText} onChange={e => setImportText(e.target.value)} placeholder={'Список покупок Глобус Саларьево\n\nОтдел Хлеб\n• Хлеб тостовый, - 1 шт.'} /><button className="primary wide" onClick={importList}>Распознать и импортировать</button></>}
+      {modal === "add" && <><span className="modal-icon"><Plus size={21} /></span><h2>Добавить товары</h2><p>Один товар на строку. Количество можно написать через тире.</p><label>Магазин<select value={addGroup} onChange={e => { setAddGroup(e.target.value); setAddSection("__none"); }}>{current.groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label><label>Отдел<select value={addSection} onChange={e => setAddSection(e.target.value)}><option value="__none">Без отдела</option>{current.groups.find(group => group.id === addGroup)?.sections.filter(section => section.name).map(section => <option key={section.id} value={section.id}>{section.name}</option>)}</select></label><textarea value={addText} onChange={e => setAddText(e.target.value)} placeholder={'Молоко — 2 шт.\nСметана — 1 уп.'} /><button className="primary wide" onClick={addItems}>Добавить товары</button></>}
+      {modal === "receipt" && <><span className="modal-icon"><ReceiptText size={21} /></span><h2>Сверить с чеком</h2><p>Вставьте позиции чека вместе с ценами. Складно найдёт совпадения, добавит цены и отметит покупки.</p><textarea className="large" value={receiptText} onChange={e => setReceiptText(e.target.value)} placeholder={'Хлеб тостовый Harrys 169,99\nЛаваш Армянский 119,99'} /><button className="primary wide" onClick={applyReceipt}>Сопоставить позиции</button></>}
+      {modal === "share" && <><span className="modal-icon"><Share2 size={21} /></span><h2>Поделиться списком</h2><p>В ссылку попадёт только «{current.name}». Остальные списки останутся приватными.</p><div className="share-code">{current.roomId}<span>Секретный код списка</span></div><button className="primary wide" onClick={share}>Скопировать ссылку</button><small className="hint">Короткая ссылка содержит только секретный код списка.</small></>}
+      {modal === "store" && <><span className="modal-icon"><StoreIcon size={21} /></span><h2>{editingGroup ? "Настроить магазин" : "Добавить магазин"}</h2><p>{editingGroup ? "Измените название, состав и порядок отделов." : "Создайте ещё одну группу покупок внутри этого списка."}</p><label>Название магазина<input autoFocus value={storeDraft} onChange={event => setStoreDraft(event.target.value)} onKeyDown={event => event.key === "Enter" && saveStore()} placeholder="Например, Лемана ПРО" /></label>{editingGroup && (() => { const group = current.groups.find(item => item.id === editingGroup); const departments = group?.sections.filter(section => section.name) || []; return group && <div className="department-order"><div className="order-title"><b>Отделы</b><span>Порядок на экране</span></div>{departments.map((section, index) => <div className="order-row" key={section.id}><span className="drag-index">{index + 1}</span><input value={section.name} onChange={event => updateSectionName(group.id, section.id, event.target.value || "Без названия")} aria-label="Название отдела" /><button onClick={() => moveDepartment(group.id, section.id, -1)} disabled={index === 0} aria-label="Поднять отдел"><ArrowUp size={16} /></button><button onClick={() => moveDepartment(group.id, section.id, 1)} disabled={index === departments.length - 1} aria-label="Опустить отдел"><ArrowDown size={16} /></button><button className="order-delete" onClick={() => deleteSection(group.id, section)} aria-label={`Удалить ${section.name}`}><Trash2 size={16} /></button></div>)}{!departments.length && <div className="empty-departments">Отделов пока нет — товары могут лежать прямо в магазине.</div>}<button className="secondary wide compact" onClick={() => addDepartment(group.id)}><Plus size={15} />Добавить отдел</button></div>; })()}<div className="modal-actions"><button className="primary" onClick={saveStore}>{editingGroup ? "Сохранить" : "Добавить магазин"}</button>{editingGroup && current.groups.find(item => item.id === editingGroup) && <button className="delete-store" onClick={() => deleteStore(current.groups.find(item => item.id === editingGroup)!)}><Trash2 size={16} />Удалить магазин</button>}</div></>}
       {modal === "lists" && <ListManager store={store} setStore={setStore} current={current} newListName={newListName} setNewListName={setNewListName} close={() => setModal(null)} flash={flash} />}
     </div></div>}
   </div>;
@@ -397,7 +430,7 @@ function ShoppingItemRow({ item, selected, onSelect, onStatus, onQty, onDelete }
     <button className="swipe-delete" onClick={onDelete}>Удалить</button>
     <article className={`item ${item.status}`} style={{ transform: `translateX(${offset}px)` }} onTouchStart={start} onTouchMove={move} onTouchEnd={end}>
       <input aria-label={`Выбрать ${item.name}`} type="checkbox" checked={selected} onChange={event => onSelect(event.target.checked)} />
-      <button className={`status ${item.status}`} onClick={onStatus} aria-label="Изменить статус">{item.status === "bought" ? "✓" : item.status === "cart" ? "▣" : ""}</button>
+      <button className={`status ${item.status}`} onClick={onStatus} aria-label="Изменить статус">{item.status === "bought" ? <Check size={14} /> : item.status === "cart" ? <ShoppingCart size={13} /> : ""}</button>
       <div className="item-name"><strong>{item.name}</strong><small>{item.status === "planned" ? "Нужно купить" : item.status === "cart" ? "В корзине" : item.price ? formatMoney(item.price) : "Куплено"}</small></div>
       <div className="stepper"><button onClick={() => onQty(-1)}>−</button><span>{item.qty} <small>{item.unit}</small></span><button onClick={() => onQty(1)}>＋</button></div>
       <button className="item-delete" onClick={() => window.confirm(`Удалить «${item.name}»?`) && onDelete()} aria-label={`Удалить ${item.name}`}>×</button>
@@ -432,7 +465,7 @@ function ListManager({ store, setStore, current, newListName, setNewListName, cl
     updateGroups(groups => groups.map(group => group.id === groupId ? { ...group, sections: group.sections.filter(item => item.id !== section.id) } : group));
   };
   return <>
-    <span className="modal-icon">☷</span><h2>Списки и магазины</h2>
+    <span className="modal-icon"><List size={21} /></span><h2>Списки и магазины</h2>
     <div className="new-list-row"><input value={newListName} onChange={e => setNewListName(e.target.value)} placeholder="Название нового списка" onKeyDown={e => e.key === "Enter" && create()} /><button className="primary" onClick={create}>Создать</button></div>
     <div className="manage-lists">{store.lists.map(list => <div key={list.id}><button onClick={() => { setStore(s => ({ ...s, activeId: list.id })); close(); }}><b>{list.name}</b><small>{list.groups.length} магазинов</small></button><button className="trash" onClick={() => remove(list.id)} aria-label={`Удалить ${list.name}`}>×</button></div>)}</div>
     <h3 className="manage-title">Магазины в «{current.name}»</h3>

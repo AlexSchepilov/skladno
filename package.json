@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build"
   },
   "dependencies": {
+    "lucide-react": "^1.30.0",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },
