@@ -192,6 +192,7 @@ export default function App() {
   const [modal, setModal] = useState<Modal>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [view, setView] = useState<"list" | "split">("list");
   const [toast, setToast] = useState("");
   const [search, setSearch] = useState("");
@@ -215,6 +216,7 @@ export default function App() {
   const readyRoom = useRef<string | null>(null);
   const remoteUpdatedAt = useRef<Record<string, number>>({});
   const initialRoomHandled = useRef(false);
+  const completedContainers = useRef<Set<string>>(new Set());
 
   const mutate = (fn: (list: ShoppingList) => ShoppingList) => setStore(prev => ({ ...prev, lists: prev.lists.map(l => l.id === prev.activeId ? { ...fn(l), updatedAt: Math.max(now(), l.updatedAt + 1) } : l) }));
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2300); };
@@ -367,6 +369,35 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [current?.roomId, current?.updatedAt]);
 
+  useEffect(() => {
+    if (!current) return;
+    const completedSections = new Set<string>();
+    const completedGroups = new Set<string>();
+    for (const group of current.groups || []) {
+      const groupItems = (group.sections || []).flatMap(section => section.items || []);
+      if (groupItems.length && groupItems.every(item => item.status === "bought")) completedGroups.add(group.id);
+      for (const section of group.sections || []) {
+        const items = section.items || [];
+        if (items.length && items.every(item => item.status === "bought")) completedSections.add(section.id);
+      }
+    }
+    const previous = completedContainers.current;
+    setCollapsed(value => {
+      const next = new Set(value);
+      completedSections.forEach(id => { if (!previous.has(`section:${id}`)) next.add(id); });
+      return next;
+    });
+    setCollapsedGroups(value => {
+      const next = new Set(value);
+      completedGroups.forEach(id => { if (!previous.has(`group:${id}`)) next.add(id); });
+      return next;
+    });
+    completedContainers.current = new Set([
+      ...Array.from(completedSections, id => `section:${id}`),
+      ...Array.from(completedGroups, id => `group:${id}`),
+    ]);
+  }, [current?.id, current?.updatedAt]);
+
   const stats = useMemo(() => {
     const items = current ? listItems(current) : [];
     return { total: items.length, cart: items.filter(i => i.status === "cart").length, bought: items.filter(i => i.status === "bought").length, sum: items.reduce((n, i) => n + (i.price || 0), 0) };
@@ -496,12 +527,12 @@ export default function App() {
         </section>
         <div className="toolbar"><label className="search"><Icon><Search /></Icon><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Найти товар" /></label><button onClick={() => setModal("receipt")}><Icon><ReceiptText /></Icon> Загрузить чек</button><button className="add-store-button" onClick={() => openStoreEditor()} aria-label="Добавить магазин"><Icon><StoreIcon /></Icon><span>Добавить магазин</span></button></div>
         <div className="sections">
-          {visibleGroups.map(group => <section className="store-group" key={group.id}>
-            <div className="store-head"><span className="store-icon"><StoreIcon size={18} /></span><div><h2>{group.name}</h2><small>{group.sections.flatMap(section => section.items).length} товаров</small></div><div className="store-menu-wrap"><button className="more store-more" onClick={() => setOpenStoreMenu(value => value === group.id ? "" : group.id)} aria-label={`Меню магазина ${group.name}`}><MoreHorizontal size={20} /></button>{openStoreMenu === group.id && <div className="section-menu store-menu"><button onClick={() => openStoreEditor(group)}><Pencil size={15} />Настроить магазин</button><button className="danger" onClick={() => deleteStore(group)}><Trash2 size={15} />Удалить магазин</button></div>}</div></div>
-            <div className="store-sections">{group.sections.map(section => <section className={`department ${section.name ? "" : "direct"}`} key={section.id}>
+          {visibleGroups.map(group => <section className={`store-group ${collapsedGroups.has(group.id) ? "collapsed" : ""}`} key={group.id}>
+            <div className="store-head"><button className="collapse store-collapse" onClick={() => setCollapsedGroups(value => { const next = new Set(value); next.has(group.id) ? next.delete(group.id) : next.add(group.id); return next; })} aria-label={collapsedGroups.has(group.id) ? `Развернуть магазин ${group.name}` : `Свернуть магазин ${group.name}`}>{collapsedGroups.has(group.id) ? "›" : "⌄"}</button><span className="store-icon"><StoreIcon size={18} /></span><div><h2>{group.name}</h2><small>{group.sections.flatMap(section => section.items).length} товаров</small></div><div className="store-menu-wrap"><button className="more store-more" onClick={() => setOpenStoreMenu(value => value === group.id ? "" : group.id)} aria-label={`Меню магазина ${group.name}`}><MoreHorizontal size={20} /></button>{openStoreMenu === group.id && <div className="section-menu store-menu"><button onClick={() => openStoreEditor(group)}><Pencil size={15} />Настроить магазин</button><button className="danger" onClick={() => deleteStore(group)}><Trash2 size={15} />Удалить магазин</button></div>}</div></div>
+            {!collapsedGroups.has(group.id) && <div className="store-sections">{group.sections.map(section => <section className={`department ${section.name ? "" : "direct"}`} key={section.id}>
               {section.name && <div className="department-head"><button className="collapse" onClick={() => setCollapsed(c => { const n = new Set(c); n.has(section.id) ? n.delete(section.id) : n.add(section.id); return n; })}>{collapsed.has(section.id) ? "›" : "⌄"}</button><h2>{section.name}</h2><span>{section.items.filter(i => i.status === "bought").length}/{section.items.length}</span><div className="section-menu-wrap"><button className="more" onClick={() => setOpenSectionMenu(value => value === section.id ? "" : section.id)} aria-label={`Меню отдела ${section.name}`}><MoreHorizontal size={18} /></button>{openSectionMenu === section.id && <div className="section-menu"><button onClick={() => renameSection(group.id, section)}><Pencil size={14} />Переименовать</button><button className="danger" onClick={() => deleteSection(group.id, section)}><Trash2 size={14} />Удалить отдел</button></div>}</div></div>}
               {(!section.name || !collapsed.has(section.id)) && <div className="items">{section.items.map(item => <ShoppingItemRow key={item.id} item={item} selected={selected.has(item.id)} onSelect={checked => setSelected(prev => { const next = new Set(prev); checked ? next.add(item.id) : next.delete(item.id); return next; })} onStatus={() => cycleStatus(item.id)} onQuantity={qty => updateShoppingItem(item.id, { qty })} onUnit={unit => updateShoppingItem(item.id, { unit })} onDelete={() => deleteItems(new Set([item.id]))} />)}</div>}
-            </section>)}</div>
+            </section>)}</div>}
           </section>)}
           {!visibleGroups.length && <div className="no-results">Ничего не найдено</div>}
         </div>
