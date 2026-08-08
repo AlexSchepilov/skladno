@@ -191,33 +191,82 @@ function parseList(text: string): { name?: string; sections: Section[] } {
   return { name, sections };
 }
 
-function parseReceipt(text: string, list: ShoppingList) {
-  const found: Record<string, { price: number; qty?: number; volume?: string }> = {};
-  const all = listItems(list);
-  for (const line of text.split(/\r?\n/).map(s => s.trim()).filter(Boolean)) {
-    if (/^(?:№|итого\s*\|)/i.test(line)) continue;
-    const columns = line.split("|").map(value => value.trim());
-    const isTableRow = columns.length >= 5 && /^\d+$/.test(columns[0]);
-    const fallbackPrice = line.match(/(\d+[\s\d]*[.,]\d{2})\s*(?:₽|руб\.?)?\s*$/i);
-    if (!isTableRow && !fallbackPrice) continue;
-    const rawName = isTableRow ? columns[1] : line.slice(0, fallbackPrice!.index);
-    const receiptName = normalize(rawName);
-    const tokens = receiptName.split(" ").filter(t => t.length > 2);
-    let best: Item | undefined; let score = 0;
-    for (const item of all) {
-      const itemTokens = normalize(item.name).split(" ").filter(token => token.length > 2);
-      const shared = tokens.filter(token => itemTokens.includes(token)).length;
-      const next = shared / Math.max(Math.min(tokens.length, itemTokens.length), 1);
-      if (next > score) { score = next; best = item; }
+function parseCsvRows(text: string) {
+  const rows: string[][] = [];
+  let row: string[] = []; let cell = ""; let quoted = false;
+  const input = text.replace(/^\uFEFF/, "");
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input[index];
+    if (quoted) {
+      if (character === '"' && input[index + 1] === '"') { cell += '"'; index += 1; }
+      else if (character === '"') quoted = false;
+      else cell += character;
+    } else if (character === '"' && !cell) quoted = true;
+    else if (character === ";") { row.push(cell.trim()); cell = ""; }
+    else if (character === "\n" || character === "\r") {
+      if (character === "\r" && input[index + 1] === "\n") index += 1;
+      row.push(cell.trim()); cell = "";
+      if (row.some(value => value)) rows.push(row);
+      row = [];
+    } else cell += character;
+  }
+  row.push(cell.trim());
+  if (row.some(value => value)) rows.push(row);
+  return rows;
+}
+
+const parseCsvNumber = (value?: string) => {
+  if (!value?.trim()) return undefined;
+  const parsed = Number(value.replace(/[\s\u00a0₽]/g, "").replace(",", "."));
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+function parseReceiptCsv(text: string, list: ShoppingList) {
+  const rows = parseCsvRows(text);
+  const headerIndex = rows.findIndex(row => row.some(value => normalize(value) === "название") && row.some(value => normalize(value).startsWith("сумма")));
+  if (headerIndex < 0) return {};
+  const header = rows[headerIndex].map(normalize);
+  const column = (name: string) => header.findIndex(value => value === name || value.startsWith(name + " "));
+  const indexes = {
+    store: column("магазин"), section: column("отдел"), name: column("название"), qty: column("количество"),
+    unit: column("единица"), volume: column("объем масса"), price: column("сумма"),
+  };
+  const items = list.groups.flatMap(store => store.sections.flatMap(section => section.items.map(item => ({ store, section, item }))));
+  const found: Record<string, { price?: number; qty?: number; unit?: string; volume?: string }> = {};
+  for (const row of rows.slice(headerIndex + 1)) {
+    const rawName = row[indexes.name]?.trim();
+    if (!rawName || normalize(rawName) === "итого") continue;
+    let candidates = items;
+    const storeName = indexes.store >= 0 ? normalize(row[indexes.store] || "") : "";
+    const sectionName = indexes.section >= 0 ? normalize(row[indexes.section] || "") : "";
+    if (storeName) {
+      const narrowed = candidates.filter(entry => normalize(entry.store.name) === storeName);
+      if (narrowed.length) candidates = narrowed;
     }
-    if (best && score >= .5) {
-      const rawPrice = isTableRow ? columns[4] : fallbackPrice![1];
-      found[best.id] = {
-        price: Number(rawPrice.replace(/\s/g, "").replace(",", ".")),
-        qty: isTableRow ? Number(columns[2].replace(/\s/g, "").replace(",", ".")) || undefined : undefined,
-        volume: isTableRow ? columns[3] || undefined : undefined,
-      };
+    if (sectionName) {
+      const narrowed = candidates.filter(entry => normalize(entry.section.name || "Без отдела") === sectionName);
+      if (narrowed.length) candidates = narrowed;
     }
+    const normalizedName = normalize(rawName);
+    let match = candidates.find(entry => normalize(entry.item.name) === normalizedName);
+    if (!match) {
+      const tokens = normalizedName.split(" ").filter(token => token.length > 2);
+      let score = 0;
+      for (const candidate of candidates) {
+        const itemTokens = normalize(candidate.item.name).split(" ").filter(token => token.length > 2);
+        const shared = tokens.filter(token => itemTokens.includes(token)).length;
+        const next = shared / Math.max(Math.min(tokens.length, itemTokens.length), 1);
+        if (next > score) { score = next; match = candidate; }
+      }
+      if (score < .5) match = undefined;
+    }
+    if (!match) continue;
+    found[match.item.id] = {
+      price: indexes.price >= 0 ? parseCsvNumber(row[indexes.price]) : undefined,
+      qty: indexes.qty >= 0 ? parseCsvNumber(row[indexes.qty]) : undefined,
+      unit: indexes.unit >= 0 ? row[indexes.unit]?.trim() || undefined : undefined,
+      volume: indexes.volume >= 0 ? row[indexes.volume]?.trim() || undefined : undefined,
+    };
   }
   return found;
 }
@@ -237,7 +286,7 @@ export default function App() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-  const [view, setView] = useState<"list" | "split">("list");
+  const [view, setView] = useState<"list" | "split">(() => localStorage.getItem("skladno-view") === "split" ? "split" : "list");
   const [toast, setToast] = useState("");
   const [search, setSearch] = useState("");
   const [importText, setImportText] = useState("");
@@ -269,6 +318,7 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("skladno-store", JSON.stringify(store));
   }, [store]);
+  useEffect(() => { localStorage.setItem("skladno-view", view); }, [view]);
   useEffect(() => {
     if (!modal || !window.visualViewport) return;
     const viewport = window.visualViewport;
@@ -497,9 +547,13 @@ export default function App() {
     }) })); setAddText(""); setModal(null); flash(`Добавлено: ${lines.length}`);
   };
   const applyReceipt = () => {
-    const prices = parseReceipt(receiptText, current); const count = Object.keys(prices).length;
-    mutate(l => ({ ...l, groups: l.groups.map(group => ({ ...group, sections: group.sections.map(section => ({ ...section, items: section.items.map(item => prices[item.id] ? { ...item, price: prices[item.id].price, qty: prices[item.id].qty || item.qty, volume: prices[item.id].volume, status: "bought" } : item) })) })) }));
-    setModal(null); setReceiptText(""); flash(`Сопоставлено позиций: ${count}`);
+    const updates = parseReceiptCsv(receiptText, current); const count = Object.keys(updates).length;
+    if (!count) return flash("Не удалось сопоставить позиции из CSV");
+    mutate(l => ({ ...l, groups: l.groups.map(group => ({ ...group, sections: group.sections.map(section => ({ ...section, items: section.items.map(item => {
+      const update = updates[item.id];
+      return update ? { ...item, price: update.price ?? item.price, qty: update.qty ?? item.qty, unit: update.unit || item.unit, volume: update.volume || item.volume, status: "bought" } : item;
+    }) })) })) }));
+    setModal(null); setReceiptText(""); flash(`Импортировано позиций: ${count}`);
   };
   const renameSection = (groupId: string, section: Section) => {
     const name = window.prompt("Новое название отдела", section.name || "Без отдела");
@@ -582,7 +636,7 @@ export default function App() {
       </> : <SplitView list={current} mutate={mutate} openReceipt={() => setModal("receipt")} flash={flash} />}
     </main>
 
-    <nav className="mobile-nav"><button className="active" onClick={() => setView("list")}><Icon><List /></Icon>Список</button><button onClick={() => { setAddGroup(current.groups[0]?.id || ""); setAddSection("__none"); setModal("add"); }}><Icon><Plus /></Icon>Добавить</button><button onClick={() => { setImportGroup(current.groups[0]?.id || "__new"); setModal("import"); }}><Icon><Download /></Icon>Импорт</button><button onClick={() => setView("split")}><Icon><Divide /></Icon>Разделить</button><button onClick={() => setModal("share")}><Icon><Share2 /></Icon>Поделиться</button></nav>
+    <nav className="mobile-nav"><button className={view === "list" ? "active" : ""} onClick={() => setView("list")}><Icon><List /></Icon>Список</button><button onClick={() => { setAddGroup(current.groups[0]?.id || ""); setAddSection("__none"); setModal("add"); }}><Icon><Plus /></Icon>Добавить</button><button onClick={() => { setImportGroup(current.groups[0]?.id || "__new"); setModal("import"); }}><Icon><Download /></Icon>Импорт</button><button className={view === "split" ? "active" : ""} onClick={() => setView("split")}><Icon><Divide /></Icon>Разделить</button><button onClick={() => setModal("share")}><Icon><Share2 /></Icon>Поделиться</button></nav>
 
     {selected.size > 0 && <div className="bulk"><b>Выбрано: {selected.size}</b><button onClick={() => setStatus(selected, "cart")}><ShoppingCart size={15} />В корзину</button><button onClick={() => setStatus(selected, "bought")}><Check size={15} />Куплено</button><button onClick={() => setStatus(selected, "planned")}><Undo2 size={15} />Вернуть</button><button className="danger" onClick={() => window.confirm(`Удалить выбранные товары (${selected.size})?`) && deleteItems(selected)}><Trash2 size={15} />Удалить</button><button className="close" onClick={() => setSelected(new Set())}><X size={18} /></button></div>}
     {toast && <div className="toast"><Check size={16} />{toast}</div>}
@@ -591,7 +645,7 @@ export default function App() {
       <button className="modal-close" onClick={() => setModal(null)}>×</button>
       {modal === "import" && <><span className="modal-icon"><Download size={21} /></span><h2>Импорт покупок</h2><p>Заголовок «Список покупок …» станет названием магазина. Отделы можно не указывать.</p><label>Куда импортировать<select value={importGroup} onChange={e => setImportGroup(e.target.value)}><option value="__new">Создать новый магазин</option>{current.groups.map(group => <option key={group.id} value={group.id}>Добавить в «{group.name}»</option>)}</select></label><textarea className="large" value={importText} onChange={e => setImportText(e.target.value)} placeholder={'Список покупок Глобус Саларьево\n\nОтдел Хлеб\n• Хлеб тостовый, - 1 шт.'} /><button className="primary wide" onClick={importList}>Распознать и импортировать</button></>}
       {modal === "add" && <><span className="modal-icon"><Plus size={21} /></span><h2>Добавить товары</h2><p>Один товар на строку. Количество можно написать через тире.</p><label>Магазин<select value={addGroup} onChange={e => { setAddGroup(e.target.value); setAddSection("__none"); }}>{current.groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label><label>Отдел<select value={addSection} onChange={e => setAddSection(e.target.value)}><option value="__none">Без отдела</option>{current.groups.find(group => group.id === addGroup)?.sections.filter(section => section.name).map(section => <option key={section.id} value={section.id}>{section.name}</option>)}</select></label><textarea value={addText} onChange={e => setAddText(e.target.value)} placeholder={'Молоко — 2 шт.\nСметана — 1 уп.'} /><button className="primary wide" onClick={addItems}>Добавить товары</button></>}
-      {modal === "receipt" && <><span className="modal-icon"><ReceiptText size={21} /></span><h2>Сверить с чеком</h2><p>Вставьте таблицу с разделителем |. Складно сопоставит названия, количество, объём и итоговую сумму.</p><textarea className="large receipt-input" value={receiptText} onChange={e => setReceiptText(e.target.value)} placeholder={'№ | Название | Кол-во | Объём / Масса | Сумма, ₽\n1 | Пиво Corona Extra | 18 | 0,355 л | 2 322,00\n2 | Пиво Guinness Draft | 12 | 0,44 л | 2 508,00\nИтого |  | 30 |  | 4 830,00'} /><button className="primary wide" onClick={applyReceipt}>Сопоставить позиции</button></>}
+      {modal === "receipt" && <><span className="modal-icon"><ReceiptText size={21} /></span><h2>Импорт CSV чека</h2><p>Загрузите CSV в формате экспорта Складно. Обновятся только найденные товары — отсутствующие в файле строки останутся без изменений.</p><label className="csv-upload">CSV-файл<input type="file" accept=".csv,text/csv" onChange={async event => { const file = event.target.files?.[0]; if (file) setReceiptText(await file.text()); }} /></label><textarea className="large receipt-input" value={receiptText} onChange={e => setReceiptText(e.target.value)} placeholder={'"Магазин";"Отдел";"Название";"Количество";"Единица";"Объём / масса";"Сумма, ₽"\n"Глобус";"Напитки";"Пиво Corona Extra";"18";"шт.";"0,355 л";"2322,00"'} /><button className="primary wide" onClick={applyReceipt}>Импортировать и сопоставить</button></>}
       {modal === "share" && <><span className="modal-icon"><Share2 size={21} /></span><h2>Поделиться списком</h2><p>В ссылку попадёт только «{current.name}». Остальные списки останутся приватными.</p><div className="share-code">{current.roomId}<span>Секретный код списка</span></div><button className="primary wide" onClick={share}>Скопировать ссылку</button><small className="hint">Короткая ссылка содержит только секретный код списка.</small></>}
       {modal === "store" && <><span className="modal-icon"><StoreIcon size={21} /></span><h2>{editingGroup ? "Настроить магазин" : "Добавить магазин"}</h2><p>{editingGroup ? "Измените название, состав и порядок отделов." : "Создайте ещё одну группу покупок внутри этого списка."}</p><label>Название магазина<input value={storeDraft} onChange={event => setStoreDraft(event.target.value)} onKeyDown={event => event.key === "Enter" && saveStore()} placeholder="Например, Лемана ПРО" /></label>{editingGroup && (() => { const group = current.groups.find(item => item.id === editingGroup); const departments = group?.sections.filter(section => section.name) || []; return group && <div className="department-order"><div className="order-title"><b>Отделы</b><span>Порядок на экране</span></div>{departments.map((section, index) => <div className="order-row" key={section.id}><span className="drag-index">{index + 1}</span><input value={section.name} onChange={event => updateSectionName(group.id, section.id, event.target.value || "Без названия")} aria-label="Название отдела" /><button onClick={() => moveDepartment(group.id, section.id, -1)} disabled={index === 0} aria-label="Поднять отдел"><ArrowUp size={16} /></button><button onClick={() => moveDepartment(group.id, section.id, 1)} disabled={index === departments.length - 1} aria-label="Опустить отдел"><ArrowDown size={16} /></button><button className="order-delete" onClick={() => deleteSection(group.id, section)} aria-label={`Удалить ${section.name}`}><Trash2 size={16} /></button></div>)}{!departments.length && <div className="empty-departments">Отделов пока нет — товары могут лежать прямо в магазине.</div>}<button className="secondary wide compact" onClick={() => addDepartment(group.id)}><Plus size={15} />Добавить отдел</button></div>; })()}<div className="modal-actions"><button className="primary" onClick={saveStore}>{editingGroup ? "Сохранить" : "Добавить магазин"}</button>{editingGroup && current.groups.find(item => item.id === editingGroup) && <button className="delete-store" onClick={() => deleteStore(current.groups.find(item => item.id === editingGroup)!)}><Trash2 size={16} />Удалить магазин</button>}</div></>}
       {modal === "syncError" && <><span className="modal-icon sync-error-icon"><CircleAlert size={21} /></span><h2>Ошибка синхронизации</h2><p>Изменения остаются на этом устройстве. После восстановления соединения приложение попробует отправить их снова.</p><div className="sync-error-detail">{syncError || "Не удалось связаться с Firebase."}</div><button className="primary wide retry-button" onClick={() => location.reload()}><RefreshCw size={16} />Повторить подключение</button></>}
@@ -825,7 +879,7 @@ function SplitView({ list, mutate, openReceipt, flash }: { list: ShoppingList; m
   };
 
   return <>
-    <div className="calculator-actions"><button onClick={openReceipt}><ReceiptText size={17} />Импортировать чек</button><button onClick={exportBought}><Download size={17} />Экспорт CSV</button></div>
+    <div className="calculator-actions"><button onClick={openReceipt}><ReceiptText size={17} />Импорт CSV чека</button><button onClick={exportBought}><Download size={17} />Экспорт CSV</button></div>
     <section className="calculation-create"><div><h2>Группы расчёта</h2><p>Создайте, например, «Суббота» и «Воскресенье».</p></div><input value={newGroupName} onChange={event => setNewGroupName(event.target.value)} onKeyDown={event => event.key === "Enter" && createGroup()} placeholder="Название новой группы" /><button className="primary" onClick={createGroup}><Plus size={16} />Создать</button></section>
 
     <div className="calculation-workspace">
