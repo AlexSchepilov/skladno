@@ -1,26 +1,40 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Check, Divide, Download, List, MoreHorizontal, Pencil, Plus, ReceiptText, Search, Share2, ShoppingCart, Store as StoreIcon, Trash2, Undo2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, CircleAlert, Divide, Download, List, MoreHorizontal, Pencil, Plus, ReceiptText, RefreshCw, Search, Share2, ShoppingCart, Store as StoreIcon, Trash2, Undo2, X } from "lucide-react";
 
 type Status = "planned" | "cart" | "bought";
-type Item = { id: string; name: string; qty: number; unit: string; status: Status; price?: number; checked?: boolean };
+type Item = { id: string; name: string; qty: number; unit: string; status: Status; price?: number; volume?: string; checked?: boolean };
 type Section = { id: string; name: string; items: Item[] };
 type StoreGroup = { id: string; name: string; sections: Section[] };
-type ShoppingList = { id: string; roomId: string; name: string; groups: StoreGroup[]; updatedAt: number; schemaVersion: 2 };
+type ShoppingList = { id: string; roomId: string; name: string; dateStart?: string; dateEnd?: string; groups: StoreGroup[]; updatedAt: number; schemaVersion: 2 };
 type Store = { lists: ShoppingList[]; activeId: string };
-type Modal = null | "import" | "add" | "receipt" | "share" | "lists" | "store";
+type Modal = null | "import" | "add" | "receipt" | "share" | "lists" | "store" | "syncError";
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 const now = () => Date.now();
 const FIREBASE_URL = "https://skladno-b1126-default-rtdb.europe-west1.firebasedatabase.app";
 const normalize = (s: string) => s.toLowerCase().replace(/ё/g, "е").replace(/[^a-zа-я0-9]+/gi, " ").trim();
 const formatMoney = (n: number) => new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 2 }).format(n);
+const months = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+const parseIsoDate = (value?: string) => { const match = value?.match(/^(\d{4})-(\d{2})-(\d{2})$/); return match ? { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) } : null; };
+const formatListDates = (list: ShoppingList) => {
+  const start = parseIsoDate(list.dateStart); const end = parseIsoDate(list.dateEnd || list.dateStart);
+  if (!start || !end) return "";
+  if (start.year === end.year && start.month === end.month) return start.day === end.day ? `${start.day} ${months[start.month - 1]} ${start.year}` : `${start.day}–${end.day} ${months[start.month - 1]} ${start.year}`;
+  if (start.year === end.year) return `${start.day} ${months[start.month - 1]} – ${end.day} ${months[end.month - 1]} ${start.year}`;
+  return `${start.day} ${months[start.month - 1]} ${start.year} – ${end.day} ${months[end.month - 1]} ${end.year}`;
+};
 
 function migrateList(raw: unknown): ShoppingList {
   const list = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   if (Array.isArray(list.groups)) {
+    const rawName = String(list.name || "Новый список");
+    const oldDatedName = rawName.match(/^(.*?)\s*\(8[–-]9 августа 2026\)$/i);
     return {
       id: String(list.id || uid()), roomId: String(list.roomId || `list-${uid()}-${uid()}`),
-      name: String(list.name || "Новый список"), updatedAt: Number(list.updatedAt) || now(), schemaVersion: 2,
+      name: oldDatedName?.[1].trim() || rawName,
+      dateStart: String(list.dateStart || (oldDatedName ? "2026-08-08" : "")) || undefined,
+      dateEnd: String(list.dateEnd || (oldDatedName ? "2026-08-09" : "")) || undefined,
+      updatedAt: Number(list.updatedAt) || now(), schemaVersion: 2,
       groups: (list.groups as StoreGroup[]).map(group => ({ ...group, id: group.id || uid(), sections: Array.isArray(group.sections) ? group.sections : [] })),
     };
   }
@@ -30,7 +44,9 @@ function migrateList(raw: unknown): ShoppingList {
   const sections = Array.isArray(list.sections) ? list.sections as Section[] : [];
   return {
     id: String(list.id || uid()), roomId: String(list.roomId || `list-${uid()}-${uid()}`),
-    name: /^покупки\s+в\s+/i.test(oldName) ? "Елизарово (8–9 августа 2026)" : oldName,
+    name: /^покупки\s+в\s+/i.test(oldName) ? "Елизарово" : oldName,
+    dateStart: /^покупки\s+в\s+/i.test(oldName) ? "2026-08-08" : undefined,
+    dateEnd: /^покупки\s+в\s+/i.test(oldName) ? "2026-08-09" : undefined,
     groups: [{ id: uid(), name: [shop, store].filter(Boolean).join(" ") || "Магазин", sections }],
     updatedAt: Number(list.updatedAt) || now(), schemaVersion: 2,
   };
@@ -41,7 +57,7 @@ const listItems = (list: ShoppingList) => list.groups.flatMap(group => group.sec
 const seed: Store = {
   activeId: "globus",
   lists: [{
-    id: "globus", roomId: `globus-${uid()}-${uid()}`, name: "Елизарово (8–9 августа 2026)", updatedAt: now(), schemaVersion: 2,
+    id: "globus", roomId: `globus-${uid()}-${uid()}`, name: "Елизарово", dateStart: "2026-08-08", dateEnd: "2026-08-09", updatedAt: now(), schemaVersion: 2,
     groups: [{ id: uid(), name: "Глобус Саларьево", sections: [
       { id: uid(), name: "Хлеб", items: [
         { id: uid(), name: "Хлеб тостовый Harry's American Sandwich", qty: 1, unit: "шт.", status: "bought", price: 169.99 },
@@ -85,20 +101,32 @@ function parseList(text: string): { name?: string; sections: Section[] } {
 }
 
 function parseReceipt(text: string, list: ShoppingList) {
-  const found: Record<string, number> = {};
+  const found: Record<string, { price: number; qty?: number; volume?: string }> = {};
   const all = listItems(list);
   for (const line of text.split(/\r?\n/).map(s => s.trim()).filter(Boolean)) {
-    const price = line.match(/(\d+[\s\d]*[.,]\d{2})\s*(?:₽|руб\.?)?\s*$/i);
-    if (!price) continue;
-    const receiptName = normalize(line.slice(0, price.index));
+    if (/^(?:№|итого\s*\|)/i.test(line)) continue;
+    const columns = line.split("|").map(value => value.trim());
+    const isTableRow = columns.length >= 5 && /^\d+$/.test(columns[0]);
+    const fallbackPrice = line.match(/(\d+[\s\d]*[.,]\d{2})\s*(?:₽|руб\.?)?\s*$/i);
+    if (!isTableRow && !fallbackPrice) continue;
+    const rawName = isTableRow ? columns[1] : line.slice(0, fallbackPrice!.index);
+    const receiptName = normalize(rawName);
     const tokens = receiptName.split(" ").filter(t => t.length > 2);
     let best: Item | undefined; let score = 0;
     for (const item of all) {
-      const n = normalize(item.name);
-      const next = tokens.filter(t => n.includes(t)).length / Math.max(tokens.length, 1);
+      const itemTokens = normalize(item.name).split(" ").filter(token => token.length > 2);
+      const shared = tokens.filter(token => itemTokens.includes(token)).length;
+      const next = shared / Math.max(Math.min(tokens.length, itemTokens.length), 1);
       if (next > score) { score = next; best = item; }
     }
-    if (best && score >= .35) found[best.id] = Number(price[1].replace(/\s/g, "").replace(",", "."));
+    if (best && score >= .5) {
+      const rawPrice = isTableRow ? columns[4] : fallbackPrice![1];
+      found[best.id] = {
+        price: Number(rawPrice.replace(/\s/g, "").replace(",", ".")),
+        qty: isTableRow ? Number(columns[2].replace(/\s/g, "").replace(",", ".")) || undefined : undefined,
+        volume: isTableRow ? columns[3] || undefined : undefined,
+      };
+    }
   }
   return found;
 }
@@ -133,6 +161,7 @@ export default function App() {
   const [editingGroup, setEditingGroup] = useState("");
   const [storeDraft, setStoreDraft] = useState("");
   const [syncState, setSyncState] = useState<"syncing" | "online" | "error">("syncing");
+  const [syncError, setSyncError] = useState("");
   const current = store.lists.find(l => l.id === store.activeId) || store.lists[0];
   const currentRef = useRef<ShoppingList | undefined>(current);
   const readyRoom = useRef<string | null>(null);
@@ -169,7 +198,7 @@ export default function App() {
     });
   }, []);
   useEffect(() => {
-    if (!current) { setSyncState("error"); return; }
+    if (!current) { setSyncState("error"); setSyncError("Активный список не найден."); return; }
     const roomId = current.roomId;
     let stopped = false;
     let firstPull = true;
@@ -190,7 +219,8 @@ export default function App() {
     const applyRemote = (raw: ShoppingList) => {
       const remote = migrateList(raw);
       const timestamp = Number(remote.updatedAt) || 0;
-      const migratedTimestamp = raw.schemaVersion === 2 ? timestamp : Math.max(now(), timestamp + 1);
+      const needsMigration = raw.schemaVersion !== 2 || raw.name !== remote.name || raw.dateStart !== remote.dateStart || raw.dateEnd !== remote.dateEnd;
+      const migratedTimestamp = needsMigration ? Math.max(now(), timestamp + 1) : timestamp;
       remoteUpdatedAt.current[roomId] = timestamp;
       setStore(prev => {
         const local = prev.lists.find(list => list.roomId === roomId);
@@ -216,10 +246,14 @@ export default function App() {
           if (firstPull || (!isDirty && Number(remote.updatedAt) > local.updatedAt)) applyRemote(remote);
         }
         readyRoom.current = roomId;
+        setSyncError("");
         setSyncState("online");
       } catch (error) {
         console.error(error);
-        if (!stopped) setSyncState("error");
+        if (!stopped) {
+          setSyncError(!navigator.onLine ? "Нет подключения к интернету." : error instanceof Error ? error.message : "Неизвестная ошибка соединения с Firebase.");
+          setSyncState("error");
+        }
       } finally {
         firstPull = false;
         pulling = false;
@@ -248,9 +282,11 @@ export default function App() {
         const timestamp = Number(saved.updatedAt) || 0;
         remoteUpdatedAt.current[roomId] = timestamp;
         setStore(prev => ({ ...prev, lists: prev.lists.map(list => list.roomId === roomId && list.updatedAt === localVersion ? { ...saved, id: list.id, updatedAt: timestamp } : list) }));
+        setSyncError("");
         setSyncState("online");
       } catch (error) {
         console.error(error);
+        setSyncError(!navigator.onLine ? "Нет подключения к интернету." : error instanceof Error ? error.message : "Неизвестная ошибка соединения с Firebase.");
         setSyncState("error");
       }
     }, 300);
@@ -314,7 +350,7 @@ export default function App() {
   };
   const applyReceipt = () => {
     const prices = parseReceipt(receiptText, current); const count = Object.keys(prices).length;
-    mutate(l => ({ ...l, groups: l.groups.map(group => ({ ...group, sections: group.sections.map(section => ({ ...section, items: section.items.map(item => prices[item.id] ? { ...item, price: prices[item.id], status: "bought" } : item) })) })) }));
+    mutate(l => ({ ...l, groups: l.groups.map(group => ({ ...group, sections: group.sections.map(section => ({ ...section, items: section.items.map(item => prices[item.id] ? { ...item, price: prices[item.id].price, qty: prices[item.id].qty || item.qty, volume: prices[item.id].volume, status: "bought" } : item) })) })) }));
     setModal(null); setReceiptText(""); flash(`Сопоставлено позиций: ${count}`);
   };
   const renameSection = (groupId: string, section: Section) => {
@@ -370,9 +406,9 @@ export default function App() {
     <main className="content">
       <header>
         <button className="mobile-brand" onClick={() => setModal("lists")} aria-label="Списки и магазины"><span>С</span><b>Складно</b></button>
-        <div className="title-wrap"><p><span className={`live-dot ${syncState}`}></span>{syncState === "online" ? "Онлайн · синхронизировано" : syncState === "syncing" ? "Синхронизация…" : "Ошибка синхронизации"}</p>
+        <div className="title-wrap"><button className={`sync-status ${syncState}`} disabled={syncState !== "error"} onClick={() => syncState === "error" && setModal("syncError")}><span className={`live-dot ${syncState}`}></span>{syncState === "online" ? "Онлайн · синхронизировано" : syncState === "syncing" ? "Синхронизация…" : "Ошибка синхронизации · подробнее"}</button>
           <div className="editable-title"><h1 contentEditable suppressContentEditableWarning onBlur={e => mutate(l => ({ ...l, name: e.currentTarget.textContent || l.name }))}>{current.name}</h1><button aria-label="Переименовать">✎</button></div>
-          <span className="store-name">{current.groups.length} {current.groups.length === 1 ? "магазин" : "магазина"}</span>
+          {formatListDates(current) && <span className="list-dates">{formatListDates(current)}</span>}
         </div>
         <div className="header-actions"><button className="secondary" onClick={() => { setImportGroup("__new"); setModal("import"); }}><Icon><Download /></Icon><span>Импорт</span></button><button className="primary" onClick={() => { setAddGroup(current.groups[0]?.id || ""); setAddSection("__none"); setModal("add"); }}><Icon><Plus /></Icon><span>Добавить</span></button><button className="round" onClick={() => setModal("share")} aria-label="Поделиться"><Share2 size={18} /></button></div>
       </header>
@@ -398,7 +434,7 @@ export default function App() {
       </> : <SplitView list={current} people={people} setPeople={setPeople} mutate={mutate} />}
     </main>
 
-    <nav className="mobile-nav"><button className="active" onClick={() => setView("list")}><Icon><List /></Icon>Список</button><button onClick={() => { setAddGroup(current.groups[0]?.id || ""); setAddSection("__none"); setModal("add"); }}><Icon><Plus /></Icon>Добавить</button><button onClick={() => setView("split")}><Icon><Divide /></Icon>Разделить</button><button onClick={() => setModal("share")}><Icon><Share2 /></Icon>Поделиться</button></nav>
+    <nav className="mobile-nav"><button className="active" onClick={() => setView("list")}><Icon><List /></Icon>Список</button><button onClick={() => { setAddGroup(current.groups[0]?.id || ""); setAddSection("__none"); setModal("add"); }}><Icon><Plus /></Icon>Добавить</button><button onClick={() => { setImportGroup(current.groups[0]?.id || "__new"); setModal("import"); }}><Icon><Download /></Icon>Импорт</button><button onClick={() => setView("split")}><Icon><Divide /></Icon>Разделить</button><button onClick={() => setModal("share")}><Icon><Share2 /></Icon>Поделиться</button></nav>
 
     {selected.size > 0 && <div className="bulk"><b>Выбрано: {selected.size}</b><button onClick={() => setStatus(selected, "cart")}><ShoppingCart size={15} />В корзину</button><button onClick={() => setStatus(selected, "bought")}><Check size={15} />Куплено</button><button onClick={() => setStatus(selected, "planned")}><Undo2 size={15} />Вернуть</button><button className="danger" onClick={() => window.confirm(`Удалить выбранные товары (${selected.size})?`) && deleteItems(selected)}><Trash2 size={15} />Удалить</button><button className="close" onClick={() => setSelected(new Set())}><X size={18} /></button></div>}
     {toast && <div className="toast"><Check size={16} />{toast}</div>}
@@ -407,9 +443,10 @@ export default function App() {
       <button className="modal-close" onClick={() => setModal(null)}>×</button>
       {modal === "import" && <><span className="modal-icon"><Download size={21} /></span><h2>Импорт покупок</h2><p>Заголовок «Список покупок …» станет названием магазина. Отделы можно не указывать.</p><label>Куда импортировать<select value={importGroup} onChange={e => setImportGroup(e.target.value)}><option value="__new">Создать новый магазин</option>{current.groups.map(group => <option key={group.id} value={group.id}>Добавить в «{group.name}»</option>)}</select></label><textarea className="large" value={importText} onChange={e => setImportText(e.target.value)} placeholder={'Список покупок Глобус Саларьево\n\nОтдел Хлеб\n• Хлеб тостовый, - 1 шт.'} /><button className="primary wide" onClick={importList}>Распознать и импортировать</button></>}
       {modal === "add" && <><span className="modal-icon"><Plus size={21} /></span><h2>Добавить товары</h2><p>Один товар на строку. Количество можно написать через тире.</p><label>Магазин<select value={addGroup} onChange={e => { setAddGroup(e.target.value); setAddSection("__none"); }}>{current.groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label><label>Отдел<select value={addSection} onChange={e => setAddSection(e.target.value)}><option value="__none">Без отдела</option>{current.groups.find(group => group.id === addGroup)?.sections.filter(section => section.name).map(section => <option key={section.id} value={section.id}>{section.name}</option>)}</select></label><textarea value={addText} onChange={e => setAddText(e.target.value)} placeholder={'Молоко — 2 шт.\nСметана — 1 уп.'} /><button className="primary wide" onClick={addItems}>Добавить товары</button></>}
-      {modal === "receipt" && <><span className="modal-icon"><ReceiptText size={21} /></span><h2>Сверить с чеком</h2><p>Вставьте позиции чека вместе с ценами. Складно найдёт совпадения, добавит цены и отметит покупки.</p><textarea className="large" value={receiptText} onChange={e => setReceiptText(e.target.value)} placeholder={'Хлеб тостовый Harrys 169,99\nЛаваш Армянский 119,99'} /><button className="primary wide" onClick={applyReceipt}>Сопоставить позиции</button></>}
+      {modal === "receipt" && <><span className="modal-icon"><ReceiptText size={21} /></span><h2>Сверить с чеком</h2><p>Вставьте таблицу с разделителем |. Складно сопоставит названия, количество, объём и итоговую сумму.</p><textarea className="large receipt-input" value={receiptText} onChange={e => setReceiptText(e.target.value)} placeholder={'№ | Название | Кол-во | Объём / Масса | Сумма, ₽\n1 | Пиво Corona Extra | 18 | 0,355 л | 2 322,00\n2 | Пиво Guinness Draft | 12 | 0,44 л | 2 508,00\nИтого |  | 30 |  | 4 830,00'} /><button className="primary wide" onClick={applyReceipt}>Сопоставить позиции</button></>}
       {modal === "share" && <><span className="modal-icon"><Share2 size={21} /></span><h2>Поделиться списком</h2><p>В ссылку попадёт только «{current.name}». Остальные списки останутся приватными.</p><div className="share-code">{current.roomId}<span>Секретный код списка</span></div><button className="primary wide" onClick={share}>Скопировать ссылку</button><small className="hint">Короткая ссылка содержит только секретный код списка.</small></>}
       {modal === "store" && <><span className="modal-icon"><StoreIcon size={21} /></span><h2>{editingGroup ? "Настроить магазин" : "Добавить магазин"}</h2><p>{editingGroup ? "Измените название, состав и порядок отделов." : "Создайте ещё одну группу покупок внутри этого списка."}</p><label>Название магазина<input autoFocus value={storeDraft} onChange={event => setStoreDraft(event.target.value)} onKeyDown={event => event.key === "Enter" && saveStore()} placeholder="Например, Лемана ПРО" /></label>{editingGroup && (() => { const group = current.groups.find(item => item.id === editingGroup); const departments = group?.sections.filter(section => section.name) || []; return group && <div className="department-order"><div className="order-title"><b>Отделы</b><span>Порядок на экране</span></div>{departments.map((section, index) => <div className="order-row" key={section.id}><span className="drag-index">{index + 1}</span><input value={section.name} onChange={event => updateSectionName(group.id, section.id, event.target.value || "Без названия")} aria-label="Название отдела" /><button onClick={() => moveDepartment(group.id, section.id, -1)} disabled={index === 0} aria-label="Поднять отдел"><ArrowUp size={16} /></button><button onClick={() => moveDepartment(group.id, section.id, 1)} disabled={index === departments.length - 1} aria-label="Опустить отдел"><ArrowDown size={16} /></button><button className="order-delete" onClick={() => deleteSection(group.id, section)} aria-label={`Удалить ${section.name}`}><Trash2 size={16} /></button></div>)}{!departments.length && <div className="empty-departments">Отделов пока нет — товары могут лежать прямо в магазине.</div>}<button className="secondary wide compact" onClick={() => addDepartment(group.id)}><Plus size={15} />Добавить отдел</button></div>; })()}<div className="modal-actions"><button className="primary" onClick={saveStore}>{editingGroup ? "Сохранить" : "Добавить магазин"}</button>{editingGroup && current.groups.find(item => item.id === editingGroup) && <button className="delete-store" onClick={() => deleteStore(current.groups.find(item => item.id === editingGroup)!)}><Trash2 size={16} />Удалить магазин</button>}</div></>}
+      {modal === "syncError" && <><span className="modal-icon sync-error-icon"><CircleAlert size={21} /></span><h2>Ошибка синхронизации</h2><p>Изменения остаются на этом устройстве. После восстановления соединения приложение попробует отправить их снова.</p><div className="sync-error-detail">{syncError || "Не удалось связаться с Firebase."}</div><button className="primary wide retry-button" onClick={() => location.reload()}><RefreshCw size={16} />Повторить подключение</button></>}
       {modal === "lists" && <ListManager store={store} setStore={setStore} current={current} newListName={newListName} setNewListName={setNewListName} close={() => setModal(null)} flash={flash} />}
     </div></div>}
   </div>;
@@ -431,7 +468,7 @@ function ShoppingItemRow({ item, selected, onSelect, onStatus, onQty, onDelete }
     <article className={`item ${item.status}`} style={{ transform: `translateX(${offset}px)` }} onTouchStart={start} onTouchMove={move} onTouchEnd={end}>
       <input aria-label={`Выбрать ${item.name}`} type="checkbox" checked={selected} onChange={event => onSelect(event.target.checked)} />
       <button className={`status ${item.status}`} onClick={onStatus} aria-label="Изменить статус">{item.status === "bought" ? <Check size={14} /> : item.status === "cart" ? <ShoppingCart size={13} /> : ""}</button>
-      <div className="item-name"><strong>{item.name}</strong><small>{item.status === "planned" ? "Нужно купить" : item.status === "cart" ? "В корзине" : item.price ? formatMoney(item.price) : "Куплено"}</small></div>
+      <div className="item-name"><strong>{item.name}</strong><small>{item.status === "planned" ? "Нужно купить" : item.status === "cart" ? "В корзине" : ["Куплено", item.volume, item.price ? formatMoney(item.price) : ""].filter(Boolean).join(" · ")}</small></div>
       <div className="stepper"><button onClick={() => onQty(-1)}>−</button><span>{item.qty} <small>{item.unit}</small></span><button onClick={() => onQty(1)}>＋</button></div>
       <button className="item-delete" onClick={() => window.confirm(`Удалить «${item.name}»?`) && onDelete()} aria-label={`Удалить ${item.name}`}>×</button>
     </article>
@@ -448,7 +485,16 @@ function SplitView({ list, people, setPeople, mutate }: { list: ShoppingList; pe
 }
 
 function ListManager({ store, setStore, current, newListName, setNewListName, close, flash }: { store: Store; setStore: React.Dispatch<React.SetStateAction<Store>>; current: ShoppingList; newListName: string; setNewListName: (s: string) => void; close: () => void; flash: (s: string) => void }) {
-  const create = () => { if (!newListName.trim()) return; const id = uid(); const list: ShoppingList = { id, roomId: `${id}-${uid()}-${uid()}`, name: newListName.trim(), updatedAt: now(), schemaVersion: 2, groups: [{ id: uid(), name: "Новый магазин", sections: [] }] }; setStore(s => ({ lists: [...s.lists, list], activeId: id })); setNewListName(""); close(); };
+  const [dateStart, setDateStart] = useState("");
+  const [dateEnd, setDateEnd] = useState("");
+  const create = () => {
+    if (!newListName.trim()) return flash("Введите название списка");
+    if (!dateStart) return flash("Укажите дату поездки");
+    if (dateEnd && dateEnd < dateStart) return flash("Дата окончания должна быть не раньше начала");
+    const id = uid();
+    const list: ShoppingList = { id, roomId: `${id}-${uid()}-${uid()}`, name: newListName.trim(), dateStart, dateEnd: dateEnd || dateStart, updatedAt: now(), schemaVersion: 2, groups: [{ id: uid(), name: "Новый магазин", sections: [] }] };
+    setStore(s => ({ lists: [...s.lists, list], activeId: id })); setNewListName(""); close();
+  };
   const remove = (id: string) => { if (store.lists.length === 1) return flash("Нельзя удалить единственный список"); const next = store.lists.filter(l => l.id !== id); setStore({ lists: next, activeId: id === store.activeId ? next[0].id : store.activeId }); };
   const updateGroups = (fn: (groups: StoreGroup[]) => StoreGroup[]) => setStore(s => ({ ...s, lists: s.lists.map(list => list.id === current.id ? { ...list, updatedAt: Math.max(now(), list.updatedAt + 1), groups: fn(list.groups) } : list) }));
   const addGroup = () => updateGroups(groups => [...groups, { id: uid(), name: "Новый магазин", sections: [] }]);
@@ -466,8 +512,8 @@ function ListManager({ store, setStore, current, newListName, setNewListName, cl
   };
   return <>
     <span className="modal-icon"><List size={21} /></span><h2>Списки и магазины</h2>
-    <div className="new-list-row"><input value={newListName} onChange={e => setNewListName(e.target.value)} placeholder="Название нового списка" onKeyDown={e => e.key === "Enter" && create()} /><button className="primary" onClick={create}>Создать</button></div>
-    <div className="manage-lists">{store.lists.map(list => <div key={list.id}><button onClick={() => { setStore(s => ({ ...s, activeId: list.id })); close(); }}><b>{list.name}</b><small>{list.groups.length} магазинов</small></button><button className="trash" onClick={() => remove(list.id)} aria-label={`Удалить ${list.name}`}>×</button></div>)}</div>
+    <div className="new-list-form"><label>Название<input value={newListName} onChange={e => setNewListName(e.target.value)} placeholder="Например, Елизарово" /></label><div className="date-fields"><label>Дата начала<input type="date" value={dateStart} onChange={e => { setDateStart(e.target.value); if (dateEnd && dateEnd < e.target.value) setDateEnd(""); }} /></label><label>Дата окончания <span>необязательно</span><input type="date" min={dateStart} value={dateEnd} onChange={e => setDateEnd(e.target.value)} /></label></div><button className="primary wide" onClick={create}>Создать список</button></div>
+    <div className="manage-lists">{store.lists.map(list => <div key={list.id}><button onClick={() => { setStore(s => ({ ...s, activeId: list.id })); close(); }}><b>{list.name}</b><small>{formatListDates(list) || "Дата не указана"}</small></button><button className="trash" onClick={() => remove(list.id)} aria-label={`Удалить ${list.name}`}>×</button></div>)}</div>
     <h3 className="manage-title">Магазины в «{current.name}»</h3>
     <div className="manage-groups">{current.groups.map(group => <section className="manage-group-card" key={group.id}>
       <div className="manage-group-name"><input value={group.name} onChange={e => renameGroup(group.id, e.target.value)} aria-label="Название магазина" /><button className="trash" onClick={() => removeGroup(group)} aria-label={`Удалить ${group.name}`}>×</button></div>
