@@ -209,6 +209,7 @@ export default function App() {
   const [storeDraft, setStoreDraft] = useState("");
   const [syncState, setSyncState] = useState<"syncing" | "online" | "error">("syncing");
   const [syncError, setSyncError] = useState("");
+  const [modalViewport, setModalViewport] = useState({ height: "100dvh", top: "0px" });
   const current = store.lists.find(l => l.id === store.activeId) || store.lists[0];
   const currentRef = useRef<ShoppingList | undefined>(current);
   const readyRoom = useRef<string | null>(null);
@@ -223,6 +224,21 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("skladno-store", JSON.stringify(store));
   }, [store]);
+  useEffect(() => {
+    if (!modal || !window.visualViewport) return;
+    const viewport = window.visualViewport;
+    const updateViewport = () => setModalViewport({
+      height: `${Math.round(viewport.height)}px`,
+      top: `${Math.round(viewport.offsetTop)}px`,
+    });
+    updateViewport();
+    viewport.addEventListener("resize", updateViewport);
+    viewport.addEventListener("scroll", updateViewport);
+    return () => {
+      viewport.removeEventListener("resize", updateViewport);
+      viewport.removeEventListener("scroll", updateViewport);
+    };
+  }, [modal]);
   useEffect(() => {
     const hash = new URLSearchParams(location.hash.slice(1));
     const room = hash.get("room") || "";
@@ -336,7 +352,7 @@ export default function App() {
           body: JSON.stringify(payload),
         });
         if (!response.ok) throw new Error(`Firebase write failed: ${response.status}`);
-        const saved = await response.json() as ShoppingList;
+        const saved = migrateList(await response.json());
         const timestamp = Number(saved.updatedAt) || 0;
         remoteUpdatedAt.current[roomId] = timestamp;
         setStore(prev => ({ ...prev, lists: prev.lists.map(list => list.roomId === roomId && list.updatedAt === localVersion ? { ...saved, id: list.id, updatedAt: timestamp } : list) }));
@@ -355,9 +371,9 @@ export default function App() {
     const items = current ? listItems(current) : [];
     return { total: items.length, cart: items.filter(i => i.status === "cart").length, bought: items.filter(i => i.status === "bought").length, sum: items.reduce((n, i) => n + (i.price || 0), 0) };
   }, [current]);
-  const visibleGroups = useMemo(() => current?.groups.map(group => ({
+  const visibleGroups = useMemo(() => (current?.groups || []).map(group => ({
     ...group,
-    sections: group.sections.map(section => ({ ...section, items: section.items.filter(item => normalize(item.name).includes(normalize(search))) })).filter(section => section.items.length || !search),
+    sections: (group.sections || []).map(section => ({ ...section, items: (section.items || []).filter(item => normalize(item.name).includes(normalize(search))) })).filter(section => section.items.length || !search),
   })).filter(group => group.sections.length || !search) || [], [current, search]);
 
   if (!current) return <main className="empty"><h1>Складно</h1><button onClick={() => setStore(seed)}>Создать первый список</button></main>;
@@ -497,7 +513,7 @@ export default function App() {
     {selected.size > 0 && <div className="bulk"><b>Выбрано: {selected.size}</b><button onClick={() => setStatus(selected, "cart")}><ShoppingCart size={15} />В корзину</button><button onClick={() => setStatus(selected, "bought")}><Check size={15} />Куплено</button><button onClick={() => setStatus(selected, "planned")}><Undo2 size={15} />Вернуть</button><button className="danger" onClick={() => window.confirm(`Удалить выбранные товары (${selected.size})?`) && deleteItems(selected)}><Trash2 size={15} />Удалить</button><button className="close" onClick={() => setSelected(new Set())}><X size={18} /></button></div>}
     {toast && <div className="toast"><Check size={16} />{toast}</div>}
 
-    {modal && <div className="modal-backdrop" onMouseDown={e => e.currentTarget === e.target && setModal(null)}><div className="modal" role="dialog" aria-modal="true">
+    {modal && <div className="modal-backdrop" style={{ "--modal-viewport-height": modalViewport.height, "--modal-viewport-top": modalViewport.top } as React.CSSProperties} onMouseDown={e => e.currentTarget === e.target && setModal(null)}><div className="modal" role="dialog" aria-modal="true">
       <button className="modal-close" onClick={() => setModal(null)}>×</button>
       {modal === "import" && <><span className="modal-icon"><Download size={21} /></span><h2>Импорт покупок</h2><p>Заголовок «Список покупок …» станет названием магазина. Отделы можно не указывать.</p><label>Куда импортировать<select value={importGroup} onChange={e => setImportGroup(e.target.value)}><option value="__new">Создать новый магазин</option>{current.groups.map(group => <option key={group.id} value={group.id}>Добавить в «{group.name}»</option>)}</select></label><textarea className="large" value={importText} onChange={e => setImportText(e.target.value)} placeholder={'Список покупок Глобус Саларьево\n\nОтдел Хлеб\n• Хлеб тостовый, - 1 шт.'} /><button className="primary wide" onClick={importList}>Распознать и импортировать</button></>}
       {modal === "add" && <><span className="modal-icon"><Plus size={21} /></span><h2>Добавить товары</h2><p>Один товар на строку. Количество можно написать через тире.</p><label>Магазин<select value={addGroup} onChange={e => { setAddGroup(e.target.value); setAddSection("__none"); }}>{current.groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label><label>Отдел<select value={addSection} onChange={e => setAddSection(e.target.value)}><option value="__none">Без отдела</option>{current.groups.find(group => group.id === addGroup)?.sections.filter(section => section.name).map(section => <option key={section.id} value={section.id}>{section.name}</option>)}</select></label><textarea value={addText} onChange={e => setAddText(e.target.value)} placeholder={'Молоко — 2 шт.\nСметана — 1 уп.'} /><button className="primary wide" onClick={addItems}>Добавить товары</button></>}
