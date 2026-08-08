@@ -213,6 +213,7 @@ export default function App() {
   const currentRef = useRef<ShoppingList | undefined>(current);
   const readyRoom = useRef<string | null>(null);
   const remoteUpdatedAt = useRef<Record<string, number>>({});
+  const initialRoomHandled = useRef(false);
 
   const mutate = (fn: (list: ShoppingList) => ShoppingList) => setStore(prev => ({ ...prev, lists: prev.lists.map(l => l.id === prev.activeId ? { ...fn(l), updatedAt: Math.max(now(), l.updatedAt + 1) } : l) }));
   const flash = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2300); };
@@ -244,6 +245,16 @@ export default function App() {
       return { lists: [...prev.lists, shared], activeId: sharedId };
     });
   }, []);
+  useEffect(() => {
+    if (!initialRoomHandled.current) {
+      initialRoomHandled.current = true;
+      return;
+    }
+    if (!current?.roomId) return;
+    const hash = new URLSearchParams(location.hash.slice(1));
+    if (hash.get("room") === current.roomId && !hash.has("data")) return;
+    history.replaceState(null, "", `${location.pathname}${location.search}#room=${encodeURIComponent(current.roomId)}`);
+  }, [current?.roomId]);
   useEffect(() => {
     if (!current) { setSyncState("error"); setSyncError("Активный список не найден."); return; }
     const roomId = current.roomId;
