@@ -615,6 +615,10 @@ function PriceInput({ item, onPrice }: { item: Item; onPrice: (price?: number) =
 function SplitView({ list, people, setPeople, mutate, openReceipt, flash }: { list: ShoppingList; people: number; setPeople: (n: number) => void; mutate: (fn: (l: ShoppingList) => ShoppingList) => void; openReceipt: () => void; flash: (message: string) => void }) {
   const bought = listItems(list).filter(i => i.status === "bought");
   const selected = bought.filter(i => i.checked !== false);
+  const boughtGroups = list.groups.map(group => ({
+    ...group,
+    sections: group.sections.map(section => ({ ...section, items: section.items.filter(item => item.status === "bought") })).filter(section => section.items.length),
+  })).filter(group => group.sections.length);
   const sum = selected.reduce((n, i) => n + (i.price || 0), 0);
   const updateItem = (id: string, fn: (item: Item) => Item) => mutate(l => ({ ...l, groups: l.groups.map(group => ({ ...group, sections: group.sections.map(section => ({ ...section, items: section.items.map(item => item.id === id ? fn(item) : item) })) })) }));
   const toggle = (id: string) => updateItem(id, item => ({ ...item, checked: item.checked === false }));
@@ -654,7 +658,31 @@ function SplitView({ list, people, setPeople, mutate, openReceipt, flash }: { li
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
     flash(`Экспортировано товаров: ${rows.length}`);
   };
-  return <><div className="calculator-actions"><button onClick={openReceipt}><ReceiptText size={17} />Импортировать чек</button><button onClick={exportBought}><Download size={17} />Экспорт CSV</button></div><div className="split-view"><div className="split-summary"><span>Итого к разделению</span><strong>{formatMoney(sum)}</strong><div className="people"><button onClick={() => setPeople(Math.max(1, people - 1))}>−</button><span><b>{people}</b> человек</span><button onClick={() => setPeople(people + 1)}>＋</button></div><div className="per-person"><span>С каждого</span><b>{formatMoney(sum / Math.max(people, 1))}</b></div></div><section className="calculator-list"><h2>Купленные товары <span>{selected.length} выбрано</span></h2>{bought.length ? bought.map(i => <label key={i.id}><input type="checkbox" checked={i.checked !== false} onChange={() => toggle(i.id)} /><span>{i.name}</span><PriceInput item={i} onPrice={price => updateItem(i.id, item => ({ ...item, price }))} /><b>₽</b></label>) : <p className="no-results">Сначала отметьте товары как купленные.</p>}</section></div></>;
+  return <>
+    <div className="calculator-actions"><button onClick={openReceipt}><ReceiptText size={17} />Импортировать чек</button><button onClick={exportBought}><Download size={17} />Экспорт CSV</button></div>
+    <div className="split-view">
+      <div className="split-summary"><span>Итого к разделению</span><strong>{formatMoney(sum)}</strong><div className="people"><button onClick={() => setPeople(Math.max(1, people - 1))}>−</button><span><b>{people}</b> человек</span><button onClick={() => setPeople(people + 1)}>＋</button></div><div className="per-person"><span>С каждого</span><b>{formatMoney(sum / Math.max(people, 1))}</b></div></div>
+      <section className="calculator-list">
+        <h2>Купленные товары <span>{selected.length} выбрано</span></h2>
+        {bought.length ? <>
+          <div className="calculator-columns"><span></span><span>Название</span><span>Количество</span><span>Единица</span><span>Объём / масса</span><span>Сумма</span><span></span></div>
+          {boughtGroups.map(group => <section className="calculator-store" key={group.id}>
+            <h3><StoreIcon size={16} />{group.name}<span>{group.sections.flatMap(section => section.items).length}</span></h3>
+            {group.sections.map(section => <div className="calculator-department" key={section.id}>
+              <h4>{section.name || "Без отдела"}</h4>
+              {section.items.map(item => <div className="calculator-row" key={item.id}>
+                <input type="checkbox" checked={item.checked !== false} onChange={() => toggle(item.id)} aria-label={`Включить ${item.name} в расчёт`} />
+                <span className="calculator-item-name">{item.name}</span>
+                <span className="calculator-properties"><span data-label="Кол-во">{String(item.qty).replace(".", ",")}</span><span data-label="Ед.">{item.unit}</span><span data-label="Объём / масса">{item.volume || "—"}</span></span>
+                <PriceInput item={item} onPrice={price => updateItem(item.id, value => ({ ...value, price }))} />
+                <b className="calculator-currency">₽</b>
+              </div>)}
+            </div>)}
+          </section>)}
+        </> : <p className="no-results">Сначала отметьте товары как купленные.</p>}
+      </section>
+    </div>
+  </>;
 }
 
 function ListManager({ store, setStore, current, newListName, setNewListName, close, flash }: { store: Store; setStore: React.Dispatch<React.SetStateAction<Store>>; current: ShoppingList; newListName: string; setNewListName: (s: string) => void; close: () => void; flash: (s: string) => void }) {
