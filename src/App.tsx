@@ -5,7 +5,9 @@ type Status = "planned" | "cart" | "bought";
 type Item = { id: string; name: string; qty: number; unit: string; status: Status; price?: number; volume?: string; checked?: boolean };
 type Section = { id: string; name: string; items: Item[] };
 type StoreGroup = { id: string; name: string; sections: Section[] };
-type ShoppingList = { id: string; roomId: string; name: string; dateStart?: string; dateEnd?: string; groups: StoreGroup[]; updatedAt: number; schemaVersion: 2 };
+type CalculatorAllocation = { itemId: string; qty: number };
+type CalculatorGroup = { id: string; name: string; people: number; allocations: CalculatorAllocation[] };
+type ShoppingList = { id: string; roomId: string; name: string; dateStart?: string; dateEnd?: string; groups: StoreGroup[]; calculatorGroups: CalculatorGroup[]; calculatorVersion: 1; updatedAt: number; schemaVersion: 2 };
 type Store = { lists: ShoppingList[]; activeId: string };
 type Modal = null | "import" | "add" | "receipt" | "share" | "lists" | "store" | "syncError";
 
@@ -69,30 +71,72 @@ function normalizeGroups(raw: unknown): StoreGroup[] {
   });
 }
 
+function normalizeCalculatorGroups(raw: unknown, storeGroups: StoreGroup[], migrateLegacy: boolean): CalculatorGroup[] {
+  const items = storeGroups.flatMap(group => group.sections.flatMap(section => section.items));
+  const itemById = new Map(items.map(item => [item.id, item]));
+  if (!Array.isArray(raw)) {
+    if (!migrateLegacy) return [];
+    const allocations = items.filter(item => item.status === "bought" && item.checked !== false).map(item => ({ itemId: item.id, qty: item.qty }));
+    return allocations.length ? [{ id: uid(), name: "Общий расчёт", people: 4, allocations }] : [];
+  }
+  const used = new Map<string, number>();
+  return raw.flatMap(entry => {
+    if (!entry || typeof entry !== "object") return [];
+    const value = entry as Partial<CalculatorGroup>;
+    const merged = new Map<string, number>();
+    if (Array.isArray(value.allocations)) {
+      for (const allocation of value.allocations) {
+        if (!allocation || typeof allocation !== "object") continue;
+        const itemId = String((allocation as Partial<CalculatorAllocation>).itemId || "");
+        const item = itemById.get(itemId);
+        const requested = Number((allocation as Partial<CalculatorAllocation>).qty);
+        if (!item || !Number.isFinite(requested) || requested <= 0) continue;
+        const available = Math.max(0, item.qty - (used.get(itemId) || 0));
+        const qty = Math.min(requested, available);
+        if (qty <= 0) continue;
+        const rounded = Math.round(qty * 1000) / 1000;
+        merged.set(itemId, (merged.get(itemId) || 0) + rounded);
+        used.set(itemId, (used.get(itemId) || 0) + rounded);
+      }
+    }
+    return [{
+      id: String(value.id || uid()),
+      name: String(value.name || "Новый расчёт"),
+      people: Math.max(1, Math.round(Number(value.people) || 1)),
+      allocations: Array.from(merged, ([itemId, qty]) => ({ itemId, qty })),
+    }];
+  });
+}
+
 function migrateList(raw: unknown): ShoppingList {
   const list = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   if (Array.isArray(list.groups)) {
     const rawName = String(list.name || "Новый список");
     const oldDatedName = rawName.match(/^(.*?)\s*\(8[–-]9 августа 2026\)$/i);
+    const groups = normalizeGroups(list.groups);
     return {
       id: String(list.id || uid()), roomId: String(list.roomId || `list-${uid()}-${uid()}`),
       name: oldDatedName?.[1].trim() || rawName,
       dateStart: String(list.dateStart || (oldDatedName ? "2026-08-08" : "")) || undefined,
       dateEnd: String(list.dateEnd || (oldDatedName ? "2026-08-09" : "")) || undefined,
-      updatedAt: Number(list.updatedAt) || now(), schemaVersion: 2,
-      groups: normalizeGroups(list.groups),
+      updatedAt: Number(list.updatedAt) || now(), schemaVersion: 2, calculatorVersion: 1,
+      groups,
+      calculatorGroups: normalizeCalculatorGroups(list.calculatorGroups, groups, Number(list.calculatorVersion) < 1),
     };
   }
   const oldName = String(list.name || "Покупки");
   const shop = oldName.replace(/^покупки\s+в\s+/i, "").trim();
   const store = String(list.store || "").trim();
   const sections = normalizeSections(list.sections);
+  const groups = [{ id: uid(), name: [shop, store].filter(Boolean).join(" ") || "Магазин", sections }];
   return {
     id: String(list.id || uid()), roomId: String(list.roomId || `list-${uid()}-${uid()}`),
     name: /^покупки\s+в\s+/i.test(oldName) ? "Елизарово" : oldName,
     dateStart: /^покупки\s+в\s+/i.test(oldName) ? "2026-08-08" : undefined,
     dateEnd: /^покупки\s+в\s+/i.test(oldName) ? "2026-08-09" : undefined,
-    groups: [{ id: uid(), name: [shop, store].filter(Boolean).join(" ") || "Магазин", sections }],
+    groups,
+    calculatorGroups: normalizeCalculatorGroups(list.calculatorGroups, groups, true),
+    calculatorVersion: 1,
     updatedAt: Number(list.updatedAt) || now(), schemaVersion: 2,
   };
 }
@@ -104,7 +148,7 @@ const listItems = (list: ShoppingList) => (list.groups || []).flatMap(group =>
 const seed: Store = {
   activeId: "globus",
   lists: [{
-    id: "globus", roomId: `globus-${uid()}-${uid()}`, name: "Елизарово", dateStart: "2026-08-08", dateEnd: "2026-08-09", updatedAt: now(), schemaVersion: 2,
+    id: "globus", roomId: `globus-${uid()}-${uid()}`, name: "Елизарово", dateStart: "2026-08-08", dateEnd: "2026-08-09", updatedAt: now(), schemaVersion: 2, calculatorVersion: 1, calculatorGroups: [],
     groups: [{ id: uid(), name: "Глобус Саларьево", sections: [
       { id: uid(), name: "Хлеб", items: [
         { id: uid(), name: "Хлеб тостовый Harry's American Sandwich", qty: 1, unit: "шт.", status: "bought", price: 169.99 },
@@ -202,7 +246,6 @@ export default function App() {
   const [addGroup, setAddGroup] = useState("");
   const [addSection, setAddSection] = useState("__none");
   const [receiptText, setReceiptText] = useState("");
-  const [people, setPeople] = useState(4);
   const [newListName, setNewListName] = useState("");
   const [openSectionMenu, setOpenSectionMenu] = useState("");
   const [openStoreMenu, setOpenStoreMenu] = useState("");
@@ -259,7 +302,7 @@ export default function App() {
       const sharedId = uid();
       const shared: ShoppingList = snapshot
         ? { ...migrateList(snapshot), id: sharedId, roomId }
-        : { id: sharedId, roomId, name: "Загрузка списка…", groups: [], updatedAt: 0, schemaVersion: 2 };
+        : { id: sharedId, roomId, name: "Загрузка списка…", groups: [], calculatorGroups: [], calculatorVersion: 1, updatedAt: 0, schemaVersion: 2 };
       return { lists: [...prev.lists, shared], activeId: sharedId };
     });
   }, []);
@@ -295,7 +338,7 @@ export default function App() {
     const applyRemote = (raw: ShoppingList) => {
       const remote = migrateList(raw);
       const timestamp = Number(remote.updatedAt) || 0;
-      const needsMigration = raw.schemaVersion !== 2 || raw.name !== remote.name || raw.dateStart !== remote.dateStart || raw.dateEnd !== remote.dateEnd;
+      const needsMigration = raw.schemaVersion !== 2 || raw.calculatorVersion !== 1 || raw.name !== remote.name || raw.dateStart !== remote.dateStart || raw.dateEnd !== remote.dateEnd;
       const migratedTimestamp = needsMigration ? Math.max(now(), timestamp + 1) : timestamp;
       remoteUpdatedAt.current[roomId] = timestamp;
       setStore(prev => {
@@ -536,7 +579,7 @@ export default function App() {
           </section>)}
           {!visibleGroups.length && <div className="no-results">Ничего не найдено</div>}
         </div>
-      </> : <SplitView list={current} people={people} setPeople={setPeople} mutate={mutate} openReceipt={() => setModal("receipt")} flash={flash} />}
+      </> : <SplitView list={current} mutate={mutate} openReceipt={() => setModal("receipt")} flash={flash} />}
     </main>
 
     <nav className="mobile-nav"><button className="active" onClick={() => setView("list")}><Icon><List /></Icon>Список</button><button onClick={() => { setAddGroup(current.groups[0]?.id || ""); setAddSection("__none"); setModal("add"); }}><Icon><Plus /></Icon>Добавить</button><button onClick={() => { setImportGroup(current.groups[0]?.id || "__new"); setModal("import"); }}><Icon><Download /></Icon>Импорт</button><button onClick={() => setView("split")}><Icon><Divide /></Icon>Разделить</button><button onClick={() => setModal("share")}><Icon><Share2 /></Icon>Поделиться</button></nav>
@@ -612,20 +655,142 @@ function PriceInput({ item, onPrice }: { item: Item; onPrice: (price?: number) =
   return <input className="price" inputMode="decimal" value={draft} placeholder="0,00" onChange={event => setDraft(event.target.value)} onBlur={commit} onFocus={event => event.currentTarget.select()} onKeyDown={event => event.key === "Enter" && event.currentTarget.blur()} aria-label={`Цена ${item.name}`} />;
 }
 
-function SplitView({ list, people, setPeople, mutate, openReceipt, flash }: { list: ShoppingList; people: number; setPeople: (n: number) => void; mutate: (fn: (l: ShoppingList) => ShoppingList) => void; openReceipt: () => void; flash: (message: string) => void }) {
-  const bought = listItems(list).filter(i => i.status === "bought");
-  const selected = bought.filter(i => i.checked !== false);
-  const boughtGroups = list.groups.map(group => ({
-    ...group,
-    sections: group.sections.map(section => ({ ...section, items: section.items.filter(item => item.status === "bought") })).filter(section => section.items.length),
+function AllocationQuantityInput({ item, value, max, onChange }: { item: Item; value: number; max: number; onChange: (qty: number) => void }) {
+  const formatDraft = (qty: number) => String(qty).replace(".", ",");
+  const [draft, setDraft] = useState(formatDraft(value));
+  useEffect(() => { setDraft(formatDraft(value)); }, [value]);
+  const commit = () => {
+    const raw = draft.trim().replace(/\s/g, "").replace(",", ".");
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 0) return setDraft(formatDraft(value));
+    const qty = Math.min(max, Math.round(parsed * 1000) / 1000);
+    setDraft(formatDraft(qty));
+    onChange(qty);
+  };
+  return <input className="allocation-quantity" inputMode="decimal" value={draft} onChange={event => setDraft(event.target.value)} onBlur={commit} onFocus={event => event.currentTarget.select()} onKeyDown={event => event.key === "Enter" && event.currentTarget.blur()} aria-label={"Количество " + item.name + " в расчёте"} />;
+}
+
+function SplitView({ list, mutate, openReceipt, flash }: { list: ShoppingList; mutate: (fn: (l: ShoppingList) => ShoppingList) => void; openReceipt: () => void; flash: (message: string) => void }) {
+  const items = listItems(list);
+  const bought = items.filter(item => item.status === "bought");
+  const [newGroupName, setNewGroupName] = useState("");
+  const [activeGroupId, setActiveGroupId] = useState(list.calculatorGroups[0]?.id || "");
+  const [targetGroupId, setTargetGroupId] = useState(list.calculatorGroups[0]?.id || "");
+  const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
+
+  const itemInfo = new Map<string, { item: Item; store: StoreGroup; section: Section }>();
+  list.groups.forEach(store => store.sections.forEach(section => section.items.forEach(item => itemInfo.set(item.id, { item, store, section }))));
+  const allocatedTotals = new Map<string, number>();
+  list.calculatorGroups.forEach(group => group.allocations.forEach(allocation => allocatedTotals.set(allocation.itemId, (allocatedTotals.get(allocation.itemId) || 0) + allocation.qty)));
+  const activeGroup = list.calculatorGroups.find(group => group.id === activeGroupId) || list.calculatorGroups[0];
+  const remainingFor = (item: Item) => Math.max(0, Math.round((item.qty - (allocatedTotals.get(item.id) || 0)) * 1000) / 1000);
+  const allocationCost = (allocation: CalculatorAllocation) => {
+    const item = itemInfo.get(allocation.itemId)?.item;
+    return item && item.qty > 0 ? (item.price || 0) * allocation.qty / item.qty : 0;
+  };
+  const groupTotal = (group: CalculatorGroup) => group.allocations.reduce((total, allocation) => total + allocationCost(allocation), 0);
+
+  useEffect(() => {
+    const first = list.calculatorGroups[0]?.id || "";
+    if (!list.calculatorGroups.some(group => group.id === activeGroupId)) setActiveGroupId(first);
+    if (!list.calculatorGroups.some(group => group.id === targetGroupId)) setTargetGroupId(first);
+  }, [list.calculatorGroups, activeGroupId, targetGroupId]);
+  useEffect(() => {
+    const itemIds = new Set(items.map(item => item.id));
+    setSelectedItems(value => new Set(Array.from(value).filter(id => itemIds.has(id))));
+  }, [list.updatedAt]);
+
+  const createGroup = () => {
+    const name = newGroupName.trim();
+    if (!name) return flash("Введите название группы расчёта");
+    const group: CalculatorGroup = { id: uid(), name, people: 1, allocations: [] };
+    mutate(value => ({ ...value, calculatorGroups: [...value.calculatorGroups, group] }));
+    setNewGroupName("");
+    setActiveGroupId(group.id);
+    setTargetGroupId(group.id);
+    flash("Группа расчёта создана");
+  };
+  const renameGroup = (group: CalculatorGroup) => {
+    const name = window.prompt("Название группы расчёта", group.name);
+    if (!name?.trim()) return;
+    mutate(value => ({ ...value, calculatorGroups: value.calculatorGroups.map(item => item.id === group.id ? { ...item, name: name.trim() } : item) }));
+  };
+  const deleteGroup = (group: CalculatorGroup) => {
+    if (!window.confirm("Удалить группу «" + group.name + "»? Товары снова станут нераспределёнными.")) return;
+    mutate(value => ({ ...value, calculatorGroups: value.calculatorGroups.filter(item => item.id !== group.id) }));
+    flash("Группа расчёта удалена");
+  };
+  const updatePeople = (groupId: string, people: number) => mutate(value => ({
+    ...value,
+    calculatorGroups: value.calculatorGroups.map(group => group.id === groupId ? { ...group, people: Math.max(1, people) } : group),
   }));
-  const sum = selected.reduce((n, i) => n + (i.price || 0), 0);
-  const updateItem = (id: string, fn: (item: Item) => Item) => mutate(l => ({ ...l, groups: l.groups.map(group => ({ ...group, sections: group.sections.map(section => ({ ...section, items: section.items.map(item => item.id === id ? fn(item) : item) })) })) }));
-  const toggle = (id: string) => updateItem(id, item => ({ ...item, checked: item.checked === false }));
+  const updateAllocation = (groupId: string, itemId: string, requested: number) => mutate(value => {
+    const item = value.groups.flatMap(store => store.sections.flatMap(section => section.items)).find(entry => entry.id === itemId);
+    if (!item) return value;
+    const otherQty = value.calculatorGroups.filter(group => group.id !== groupId).flatMap(group => group.allocations).filter(allocation => allocation.itemId === itemId).reduce((total, allocation) => total + allocation.qty, 0);
+    const qty = Math.min(Math.max(0, requested), Math.max(0, item.qty - otherQty));
+    return {
+      ...value,
+      calculatorGroups: value.calculatorGroups.map(group => group.id !== groupId ? group : {
+        ...group,
+        allocations: qty <= 0
+          ? group.allocations.filter(allocation => allocation.itemId !== itemId)
+          : group.allocations.some(allocation => allocation.itemId === itemId)
+            ? group.allocations.map(allocation => allocation.itemId === itemId ? { ...allocation, qty: Math.round(qty * 1000) / 1000 } : allocation)
+            : [...group.allocations, { itemId, qty: Math.round(qty * 1000) / 1000 }],
+      }),
+    };
+  });
+  const addSelectedToGroup = () => {
+    if (!targetGroupId) return flash("Сначала создайте группу расчёта");
+    const ids = Array.from(selectedItems);
+    if (!ids.length) return flash("Выберите товары");
+    mutate(value => {
+      const allItems = value.groups.flatMap(store => store.sections.flatMap(section => section.items));
+      const totals = new Map<string, number>();
+      value.calculatorGroups.forEach(group => group.allocations.forEach(allocation => totals.set(allocation.itemId, (totals.get(allocation.itemId) || 0) + allocation.qty)));
+      return {
+        ...value,
+        calculatorGroups: value.calculatorGroups.map(group => {
+          if (group.id !== targetGroupId) return group;
+          const allocations = [...group.allocations];
+          ids.forEach(itemId => {
+            const item = allItems.find(entry => entry.id === itemId);
+            if (!item) return;
+            const remaining = Math.max(0, item.qty - (totals.get(itemId) || 0));
+            if (remaining <= 0) return;
+            const index = allocations.findIndex(allocation => allocation.itemId === itemId);
+            if (index >= 0) allocations[index] = { ...allocations[index], qty: Math.round((allocations[index].qty + remaining) * 1000) / 1000 };
+            else allocations.push({ itemId, qty: Math.round(remaining * 1000) / 1000 });
+          });
+          return { ...group, allocations };
+        }),
+      };
+    });
+    setActiveGroupId(targetGroupId);
+    setSelectedItems(new Set());
+    flash("Товары добавлены в расчёт");
+  };
+
+  const activeStores = activeGroup ? list.groups.map(store => ({
+    ...store,
+    sections: store.sections.map(section => ({
+      ...section,
+      allocations: section.items.flatMap(item => {
+        const allocation = activeGroup.allocations.find(entry => entry.itemId === item.id);
+        return allocation ? [{ item, allocation }] : [];
+      }),
+    })).filter(section => section.allocations.length),
+  })).filter(store => store.sections.length) : [];
+  const distributionStores = list.groups.map(store => ({
+    ...store,
+    sections: store.sections.filter(section => section.items.length),
+  })).filter(store => store.sections.length);
+
   const exportBought = () => {
-    const rows: Array<Array<string | number>> = list.groups.flatMap(group => group.sections.flatMap(section =>
+    const rows: Array<Array<string | number>> = list.groups.flatMap(store => store.sections.flatMap(section =>
       section.items.filter(item => item.status === "bought").map(item => [
-        group.name,
+        store.name,
         section.name || "Без отдела",
         item.name,
         String(item.qty).replace(".", ","),
@@ -637,8 +802,8 @@ function SplitView({ list, people, setPeople, mutate, openReceipt, flash }: { li
     if (!rows.length) return flash("Нет купленных товаров для экспорта");
     const csvCell = (value: string | number) => {
       const text = String(value);
-      const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
-      return `"${safe.replace(/"/g, '""')}"`;
+      const safe = /^[=+\-@]/.test(text) ? "'" + text : text;
+      return '"' + safe.replace(/"/g, '""') + '"';
     };
     const total = bought.reduce((value, item) => value + (item.price || 0), 0).toFixed(2).replace(".", ",");
     const csvRows: Array<Array<string | number>> = [
@@ -651,38 +816,47 @@ function SplitView({ list, people, setPeople, mutate, openReceipt, flash }: { li
     const link = document.createElement("a");
     const fileName = list.name.replace(/[\\/:*?"<>|]+/g, " ").trim() || "Покупки";
     link.href = url;
-    link.download = `${fileName} — куплено.csv`;
+    link.download = fileName + " — куплено.csv";
     document.body.appendChild(link);
     link.click();
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
-    flash(`Экспортировано товаров: ${rows.length}`);
+    flash("Экспортировано товаров: " + rows.length);
   };
+
   return <>
     <div className="calculator-actions"><button onClick={openReceipt}><ReceiptText size={17} />Импортировать чек</button><button onClick={exportBought}><Download size={17} />Экспорт CSV</button></div>
-    <div className="split-view">
-      <div className="split-summary"><span>Итого к разделению</span><strong>{formatMoney(sum)}</strong><div className="people"><button onClick={() => setPeople(Math.max(1, people - 1))}>−</button><span><b>{people}</b> человек</span><button onClick={() => setPeople(people + 1)}>＋</button></div><div className="per-person"><span>С каждого</span><b>{formatMoney(sum / Math.max(people, 1))}</b></div></div>
-      <section className="calculator-list">
-        <h2>Купленные товары <span>{selected.length} выбрано</span></h2>
-        {bought.length && <div className="calculator-columns"><span></span><span>Название</span><span>Количество</span><span>Единица</span><span>Объём / масса</span><span>Сумма</span><span></span></div>}
-        {boughtGroups.length ? boughtGroups.map(group => <section className="calculator-store" key={group.id}>
-            <h3><StoreIcon size={16} />{group.name}<span>{group.sections.flatMap(section => section.items).length}</span></h3>
-            {group.sections.length ? group.sections.map(section => <div className="calculator-department" key={section.id}>
-              <h4>{section.name || "Без отдела"}</h4>
-              {section.items.map(item => <div className="calculator-row" key={item.id}>
-                <input type="checkbox" checked={item.checked !== false} onChange={() => toggle(item.id)} aria-label={`Включить ${item.name} в расчёт`} />
-                <span className="calculator-item-name">{item.name}</span>
-                <span className="calculator-properties"><span data-label="Кол-во">{String(item.qty).replace(".", ",")}</span><span data-label="Ед.">{item.unit}</span><span data-label="Объём / масса">{item.volume || "—"}</span></span>
-                <PriceInput item={item} onPrice={price => updateItem(item.id, value => ({ ...value, price }))} />
-                <b className="calculator-currency">₽</b>
-              </div>)}
-            </div>) : <p className="calculator-store-empty">Нет купленных товаров</p>}
-          </section>) : <p className="no-results">Добавьте хотя бы один магазин.</p>}
+    <section className="calculation-create"><div><h2>Группы расчёта</h2><p>Создайте, например, «Суббота» и «Воскресенье».</p></div><input value={newGroupName} onChange={event => setNewGroupName(event.target.value)} onKeyDown={event => event.key === "Enter" && createGroup()} placeholder="Название новой группы" /><button className="primary" onClick={createGroup}><Plus size={16} />Создать</button></section>
+
+    <div className="calculation-workspace">
+      <nav className="calculation-group-list">
+        {list.calculatorGroups.map(group => <button className={group.id === activeGroup?.id ? "active" : ""} key={group.id} onClick={() => setActiveGroupId(group.id)}><span>{group.name}</span><b>{formatMoney(groupTotal(group))}</b><small>{group.allocations.length} позиций</small></button>)}
+        {!list.calculatorGroups.length && <p>Групп пока нет</p>}
+      </nav>
+      <section className="calculation-group-panel">
+        {activeGroup ? <>
+          <div className="calculation-group-head"><div><span>Группа расчёта</span><h2>{activeGroup.name}</h2></div><button onClick={() => renameGroup(activeGroup)} aria-label="Переименовать группу"><Pencil size={16} /></button><button className="danger" onClick={() => deleteGroup(activeGroup)} aria-label="Удалить группу"><Trash2 size={16} /></button></div>
+          <div className="calculation-summary"><div><span>Сумма группы</span><strong>{formatMoney(groupTotal(activeGroup))}</strong></div><div className="calculation-people"><button onClick={() => updatePeople(activeGroup.id, activeGroup.people - 1)}>−</button><span><b>{activeGroup.people}</b> человек</span><button onClick={() => updatePeople(activeGroup.id, activeGroup.people + 1)}>＋</button></div><div><span>С каждого</span><strong>{formatMoney(groupTotal(activeGroup) / Math.max(activeGroup.people, 1))}</strong></div></div>
+          <div className="allocation-columns"><span>Товар</span><span>Количество</span><span>Сумма части</span><span></span></div>
+          {activeStores.length ? activeStores.map(store => <section className="allocation-store" key={store.id}><h3><StoreIcon size={15} />{store.name}</h3>{store.sections.map(section => <div className="allocation-department" key={section.id}><h4>{section.name || "Без отдела"}</h4>{section.allocations.map(({ item, allocation }) => {
+            const otherQty = (allocatedTotals.get(item.id) || 0) - allocation.qty;
+            const max = Math.max(0, item.qty - otherQty);
+            return <div className="allocation-row" key={item.id}><span>{item.name}<small>из {String(item.qty).replace(".", ",")} {item.unit}</small></span><label><AllocationQuantityInput item={item} value={allocation.qty} max={max} onChange={qty => updateAllocation(activeGroup.id, item.id, qty)} /><small>{item.unit}</small></label><b>{formatMoney(allocationCost(allocation))}</b><button onClick={() => updateAllocation(activeGroup.id, item.id, 0)} aria-label={"Убрать " + item.name}><X size={15} /></button></div>;
+          })}</div>)}</section>) : <div className="calculation-empty">В эту группу пока ничего не добавлено.</div>}
+        </> : <div className="calculation-empty large">Создайте первую группу расчёта.</div>}
       </section>
     </div>
+
+    <section className="distribution-panel">
+      <div className="distribution-head"><div><h2>Распределить товары</h2><p>Выберите несколько товаров и добавьте весь свободный остаток в группу.</p></div><select value={targetGroupId} onChange={event => setTargetGroupId(event.target.value)} disabled={!list.calculatorGroups.length}><option value="">Выберите группу</option>{list.calculatorGroups.map(group => <option value={group.id} key={group.id}>{group.name}</option>)}</select><button className="primary" onClick={addSelectedToGroup} disabled={!selectedItems.size || !targetGroupId}>Добавить {selectedItems.size ? "(" + selectedItems.size + ")" : ""}</button></div>
+      {distributionStores.length ? distributionStores.map(store => <section className="distribution-store" key={store.id}><h3><StoreIcon size={15} />{store.name}</h3>{store.sections.map(section => <div className="distribution-department" key={section.id}><h4>{section.name || "Без отдела"}</h4>{section.items.map(item => {
+        const remaining = remainingFor(item);
+        const status = item.status === "bought" ? "Куплено" : item.status === "cart" ? "В корзине" : "Запланировано";
+        return <div className={"distribution-row " + (remaining <= 0 ? "allocated" : "")} key={item.id}><input type="checkbox" checked={selectedItems.has(item.id)} disabled={remaining <= 0 || !list.calculatorGroups.length} onChange={event => setSelectedItems(value => { const next = new Set(value); event.target.checked ? next.add(item.id) : next.delete(item.id); return next; })} aria-label={"Выбрать " + item.name} /><span>{item.name}<small>{status} · {String(item.qty).replace(".", ",")} {item.unit}{item.volume ? " · " + item.volume : ""}</small></span><span className="distribution-remaining">{remaining > 0 ? "Свободно " + String(remaining).replace(".", ",") + " " + item.unit : "Распределено"}</span><PriceInput item={item} onPrice={price => mutate(value => ({ ...value, groups: value.groups.map(group => ({ ...group, sections: group.sections.map(section => ({ ...section, items: section.items.map(entry => entry.id === item.id ? { ...entry, price } : entry) })) })) }))} /><b>₽</b></div>;
+      })}</div>)}</section>) : <p className="no-results">В списке пока нет товаров.</p>}
+    </section>
   </>;
 }
-
 function ListManager({ store, setStore, current, newListName, setNewListName, close, flash }: { store: Store; setStore: React.Dispatch<React.SetStateAction<Store>>; current: ShoppingList; newListName: string; setNewListName: (s: string) => void; close: () => void; flash: (s: string) => void }) {
   const [dateStart, setDateStart] = useState("");
   const [dateEnd, setDateEnd] = useState("");
@@ -691,7 +865,7 @@ function ListManager({ store, setStore, current, newListName, setNewListName, cl
     if (!dateStart) return flash("Укажите дату поездки");
     if (dateEnd && dateEnd < dateStart) return flash("Дата окончания должна быть не раньше начала");
     const id = uid();
-    const list: ShoppingList = { id, roomId: `${id}-${uid()}-${uid()}`, name: newListName.trim(), dateStart, dateEnd: dateEnd || dateStart, updatedAt: now(), schemaVersion: 2, groups: [{ id: uid(), name: "Новый магазин", sections: [] }] };
+    const list: ShoppingList = { id, roomId: `${id}-${uid()}-${uid()}`, name: newListName.trim(), dateStart, dateEnd: dateEnd || dateStart, updatedAt: now(), schemaVersion: 2, calculatorVersion: 1, calculatorGroups: [], groups: [{ id: uid(), name: "Новый магазин", sections: [] }] };
     setStore(s => ({ lists: [...s.lists, list], activeId: id })); setNewListName(""); close();
   };
   const remove = (id: string) => { if (store.lists.length === 1) return flash("Нельзя удалить единственный список"); const next = store.lists.filter(l => l.id !== id); setStore({ lists: next, activeId: id === store.activeId ? next[0].id : store.activeId }); };
