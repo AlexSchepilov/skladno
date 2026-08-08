@@ -596,6 +596,22 @@ function ShoppingItemRow({ item, selected, onSelect, onStatus, onQuantity, onUni
   </div>;
 }
 
+function PriceInput({ item, onPrice }: { item: Item; onPrice: (price?: number) => void }) {
+  const formatDraft = (price?: number) => price === undefined ? "" : String(price).replace(".", ",");
+  const [draft, setDraft] = useState(formatDraft(item.price));
+  useEffect(() => { setDraft(formatDraft(item.price)); }, [item.price]);
+  const commit = () => {
+    const raw = draft.trim().replace(/\s/g, "").replace(",", ".");
+    if (!raw) { onPrice(undefined); return; }
+    const price = Number(raw);
+    if (!Number.isFinite(price) || price < 0) return setDraft(formatDraft(item.price));
+    const rounded = Math.round(price * 100) / 100;
+    setDraft(formatDraft(rounded));
+    onPrice(rounded);
+  };
+  return <input className="price" inputMode="decimal" value={draft} placeholder="0,00" onChange={event => setDraft(event.target.value)} onBlur={commit} onFocus={event => event.currentTarget.select()} onKeyDown={event => event.key === "Enter" && event.currentTarget.blur()} aria-label={`Цена ${item.name}`} />;
+}
+
 function SplitView({ list, people, setPeople, mutate, openReceipt, flash }: { list: ShoppingList; people: number; setPeople: (n: number) => void; mutate: (fn: (l: ShoppingList) => ShoppingList) => void; openReceipt: () => void; flash: (message: string) => void }) {
   const bought = listItems(list).filter(i => i.status === "bought");
   const selected = bought.filter(i => i.checked !== false);
@@ -638,7 +654,7 @@ function SplitView({ list, people, setPeople, mutate, openReceipt, flash }: { li
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
     flash(`Экспортировано товаров: ${rows.length}`);
   };
-  return <><div className="calculator-actions"><button onClick={openReceipt}><ReceiptText size={17} />Импортировать чек</button><button onClick={exportBought}><Download size={17} />Экспорт CSV</button></div><div className="split-view"><div className="split-summary"><span>Итого к разделению</span><strong>{formatMoney(sum)}</strong><div className="people"><button onClick={() => setPeople(Math.max(1, people - 1))}>−</button><span><b>{people}</b> человек</span><button onClick={() => setPeople(people + 1)}>＋</button></div><div className="per-person"><span>С каждого</span><b>{formatMoney(sum / Math.max(people, 1))}</b></div></div><section className="calculator-list"><h2>Купленные товары <span>{selected.length} выбрано</span></h2>{bought.length ? bought.map(i => <label key={i.id}><input type="checkbox" checked={i.checked !== false} onChange={() => toggle(i.id)} /><span>{i.name}</span><input className="price" inputMode="decimal" value={i.price || ""} placeholder="0,00" onChange={e => updateItem(i.id, item => ({ ...item, price: Number(e.target.value.replace(",", ".")) || 0 }))} /><b>₽</b></label>) : <p className="no-results">Сначала отметьте товары как купленные.</p>}</section></div></>;
+  return <><div className="calculator-actions"><button onClick={openReceipt}><ReceiptText size={17} />Импортировать чек</button><button onClick={exportBought}><Download size={17} />Экспорт CSV</button></div><div className="split-view"><div className="split-summary"><span>Итого к разделению</span><strong>{formatMoney(sum)}</strong><div className="people"><button onClick={() => setPeople(Math.max(1, people - 1))}>−</button><span><b>{people}</b> человек</span><button onClick={() => setPeople(people + 1)}>＋</button></div><div className="per-person"><span>С каждого</span><b>{formatMoney(sum / Math.max(people, 1))}</b></div></div><section className="calculator-list"><h2>Купленные товары <span>{selected.length} выбрано</span></h2>{bought.length ? bought.map(i => <label key={i.id}><input type="checkbox" checked={i.checked !== false} onChange={() => toggle(i.id)} /><span>{i.name}</span><PriceInput item={i} onPrice={price => updateItem(i.id, item => ({ ...item, price }))} /><b>₽</b></label>) : <p className="no-results">Сначала отметьте товары как купленные.</p>}</section></div></>;
 }
 
 function ListManager({ store, setStore, current, newListName, setNewListName, close, flash }: { store: Store; setStore: React.Dispatch<React.SetStateAction<Store>>; current: ShoppingList; newListName: string; setNewListName: (s: string) => void; close: () => void; flash: (s: string) => void }) {
